@@ -1,0 +1,11 @@
+{
+  "version": "2.0-image-engine",
+  "logo": "/fotografias/logo.png",
+  "background": "/assets/fundo_nomeacao.png",
+  "photoDir": "/fotografias/",
+  "shieldDir": "/escudos/",
+  "output": "1080x1920 JPEG",
+  "requiresLogo": true,
+  "blockIfShieldMissing": true,
+  "blockIfPhotoMissing": true
+}
