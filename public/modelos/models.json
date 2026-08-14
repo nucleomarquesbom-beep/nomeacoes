@@ -1,0 +1,11 @@
+{
+  "models": [
+    {"file":"01_Futebol_So_Arbitro.pptx","code":"01_Futebol_So_Arbitro","type":"futebol","roles":["Árbitro"]},
+    {"file":"02_Futebol_Arbitro_4.pptx","code":"02_Futebol_Arbitro_4","type":"futebol","roles":["Árbitro","4.º Árbitro"]},
+    {"file":"03_Futebol_Completo.pptx","code":"03_Futebol_Completo","type":"futebol","roles":["Árbitro","Árbitro Assistente 1","Árbitro Assistente 2","4.º Árbitro"]},
+    {"file":"04_Futebol_Sem_4.pptx","code":"04_Futebol_Sem_4","type":"futebol","roles":["Árbitro","Árbitro Assistente 1","Árbitro Assistente 2"]},
+    {"file":"05_Futsal_3_Arbitros.pptx","code":"05_Futsal_3_Arbitros","type":"futsal","roles":["Árbitro","2.º Árbitro","3.º Árbitro","Cronometrista"]},
+    {"file":"06_Futsal_Sem_3.pptx","code":"06_Futsal_Sem_3","type":"futsal","roles":["Árbitro","2.º Árbitro","Cronometrista"]},
+    {"file":"07_So_Observador.pptx","code":"07_So_Observador","type":"observador","roles":["Observador"]}
+  ]
+}
