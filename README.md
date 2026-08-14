@@ -1,46 +1,64 @@
-# Gerador de Nomeações — pacote definitivo
+# Gerador de Nomeações — NAF Marques Bom
 
-## Estrutura
-- `src/`: aplicação React/Vite.
-- `public/modelos/`: os 7 modelos PowerPoint reais fornecidos para o projeto.
-- `public/exemplos/NI 162 RET.pdf`: PDF real de teste.
-- `public/fotos/`: pasta para as fotografias.
+## Implementação definitiva
 
-## Regras implementadas
-### Futebol — Liga 3 / Liga BPI
-- 1.ª linha: Árbitro
-- 2.ª linha: 4.º Árbitro
-- Se apenas 1 nome da lista for encontrado no jogo, é escolhido o modelo de 1 elemento.
-- Se 2 forem encontrados, é escolhido o modelo Árbitro + 4.º Árbitro.
+O gerador deixou de depender do PowerPoint para criar as publicações.
+O JPG é desenhado diretamente num canvas 1080x1920, usando uma imagem-base
+com o fundo visual do Núcleo.
 
-### Futebol — restantes competições
-- 1.ª linha: Árbitro.
-- Elementos VAR/AVAR não são tratados como árbitros do modelo.
+### Estrutura
 
-### Futsal — Liga Placard
-- 1.ª linha: Árbitro
-- 2.ª: 2.º Árbitro
-- 3.ª: 3.º Árbitro
-- 4.ª: Cronometrista
+```text
+public/
+  assets/
+    fundo_nomeacao.png
+  fotografias/
+    logo.png
+    Nuno Guerra.jpg
+    ...
+  escudos/
+    equipa-a.png
+    equipa-b.png
+  modelos-ppt/
+```
 
-### Restante Futsal
-- 1.ª: Árbitro
-- 2.ª: 2.º Árbitro
-- 3.ª: Cronometrista
+### Logo
 
-### Observadores
-- `OBSV:` identifica o Observador.
-- Um jogo só é incluído se existir pelo menos um nome da lista.
+**Obrigatório:** colocar o logo original do Núcleo em:
 
-## Regra principal
-É gerado um resultado por jogo, não um resultado por árbitro.
+`public/fotografias/logo.png`
 
-## Vercel / GitHub
-1. Substituir o conteúdo do repositório pela estrutura deste ZIP.
-2. A raiz do repositório deve conter `index.html` e `package.json`.
-3. A Vercel deve estar ligada ao repositório GitHub.
-4. Build: `npm run build`
-5. Output: `dist`
+O programa usa o ficheiro original sem redesenhar, recolorir ou modificar o logo.
 
-## Nota sobre PowerPoint/JPG
-Os PPTX reais estão incluídos e são os modelos de referência do projeto. A leitura/seleção do modelo é feita no navegador. A exportação JPG incluída nesta versão cria uma pré-visualização web com os dados do jogo; a automação de edição/renderização direta dos PPTX requer um motor PowerPoint/LibreOffice fora do ambiente estático da Vercel.
+### Fotografias
+
+O nome do ficheiro deve corresponder ao nome da pessoa:
+
+`Nuno Guerra.jpg`
+
+`Gonçalo Rosa.jpg`
+
+### Escudos
+
+O gerador procura os escudos localmente. Se não encontrar algum, não gera
+a publicação. Aparece uma área para carregar o ficheiro em falta para a
+sessão atual. Isto evita JPGs sem escudos.
+
+### PDF
+
+O leitor usa PDF.js e agrupa os itens de texto pelas coordenadas do PDF,
+preservando a estrutura das linhas da FPF.
+
+Regras:
+- Liga 3 Placard = Futebol.
+- Liga BPI = Futebol.
+- Liga 3/BPI: linha 1 Árbitro; linha 2 4.º Árbitro.
+- Futsal: linha 1 Árbitro; linha 2 2.º Árbitro; linha 3 3.º Árbitro; linha 4 Cronometrista.
+- OBSV = Observador.
+- VAR/AVAR não são incluídos como oficiais da publicação.
+- Só são criadas publicações para jogos que contenham pelo menos um nome da lista.
+
+### Deploy
+
+No GitHub, carregar todos os ficheiros deste pacote.
+No Vercel, fazer novo deploy do repositório.

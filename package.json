@@ -1,7 +1,7 @@
 {
   "name": "gerador-nomeacoes-marques-bom",
   "private": true,
-  "version": "3.1.0",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -9,13 +9,10 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "pdfjs-dist": "^5.4.54",
-    "react": "^19.1.1",
-    "react-dom": "^19.1.1",
-    "jszip": "^3.10.1"
+    "jszip": "^3.10.1",
+    "pdfjs-dist": "^5.4.54"
   },
   "devDependencies": {
-    "@vitejs/plugin-react": "^4.7.0",
     "vite": "^7.1.2"
   }
 }
