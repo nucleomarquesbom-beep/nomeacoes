@@ -242,11 +242,42 @@ function finalizeGame(current) {
  * O primeiro continua a ocupar a posição 0 e Nuno a posição 1,
  * logo Nuno = 4.º Árbitro.
  */
+function headerAnchors(items) {
+  const a = { game: null, official: null, assoc: null };
+  for (const it of items) {
+    const n = normalizeText(it.text);
+    if (n === 'jogo') a.game = it.x;
+    else if (n === 'arbitro') a.official = it.x;
+    else if (n === 'associacao') a.assoc = it.x;
+  }
+  return a;
+}
+
+function columnText(line, anchors) {
+  const out = { game: [], official: [], assoc: [] };
+  if (anchors.game == null || anchors.official == null || anchors.assoc == null) return out;
+
+  for (const it of line.items) {
+    const candidates = [
+      ['game', Math.abs(it.x - anchors.game)],
+      ['official', Math.abs(it.x - anchors.official)],
+      ['assoc', Math.abs(it.x - anchors.assoc)]
+    ].sort((a, b) => a[1] - b[1]);
+    out[candidates[0][0]].push(it.text);
+  }
+  return {
+    game: out.game.join(' ').replace(/\s+/g, ' ').trim(),
+    official: out.official.join(' ').replace(/\s+/g, ' ').trim(),
+    assoc: out.assoc.join(' ').replace(/\s+/g, ' ').trim()
+  };
+}
+
 function parsePage(page) {
   const games = [];
   let competition = '';
   let current = null;
   let table = false;
+  let anchors = null;
 
   function pushCurrent() {
     const game = finalizeGame(current);
@@ -255,11 +286,13 @@ function parsePage(page) {
   }
 
   for (let i = 0; i < page.lines.length; i++) {
-    const text = page.lines[i].text.trim();
+    const line = page.lines[i];
+    const text = line.text.trim();
     if (!text) continue;
 
     if (isHeader(text)) {
       pushCurrent();
+      anchors = headerAnchors(line.items);
       table = true;
       continue;
     }
@@ -272,12 +305,15 @@ function parsePage(page) {
     if (isMeta(text)) {
       pushCurrent();
       table = false;
+      anchors = null;
       continue;
     }
 
     if (isCompetition(text) && !hasAssociation(text)) {
       pushCurrent();
       competition = text;
+      table = false;
+      anchors = null;
       continue;
     }
 
@@ -291,87 +327,43 @@ function parsePage(page) {
     }
 
     if (isVAR(text)) continue;
-
     if (!hasAssociation(text)) continue;
 
-    const withoutAssociation = removeAssociation(text);
-    const listed = findListedInText(withoutAssociation);
+    const cols = columnText(line, anchors);
+    const assoc = cols.assoc || '';
+    const official = cols.official || '';
+    const gameText = cols.game || '';
 
-    /*
-     * Caso 1:
-     * A linha contém jogo + primeiro oficial.
-     *
-     * Exemplo:
-     * LUSITANO ... - ATLÉTICO ... GONCALO ROSA A.F. COIMBRA
-     */
-    if (looksLikeGameLine(text)) {
-      const prefix = listed
-        ? withoutAssociation.slice(
-            0,
-            withoutAssociation.toLowerCase().indexOf(
-              normalizeText(listed.name).toLowerCase()
-            )
-          )
-        : withoutAssociation;
+    // FPF's table has a fixed semantic boundary: the game is under "Jogo",
+    // the referee under "Árbitro", and the association under "Associação".
+    // This is much safer than trying to guess where a team name ends from
+    // the concatenated text string.
+    if (gameText.includes(' - ') && official && /^A\.?\s*F\.?/i.test(assoc)) {
+      pushCurrent();
 
-      let parts = splitGamePrefix(prefix);
+      const dash = gameText.lastIndexOf(' - ');
+      const home = gameText.slice(0, dash).trim();
+      const away = gameText.slice(dash + 3).trim();
+      const listed = findListedName(official);
 
-      /*
-       * Se a procura direta não funcionar por causa de acentos,
-       * tentamos retirar o último nome reconhecido da linha.
-       */
-      if (!parts && listed) {
-        const normalizedLine = normalizeText(withoutAssociation);
-        const normalizedName = normalizeText(listed.name);
-        const p = normalizedLine.indexOf(normalizedName);
-
-        if (p >= 0) {
-          parts = splitGamePrefix(withoutAssociation.slice(0, p));
-        }
-      }
-
-      if (parts) {
-        pushCurrent();
-
-        current = {
-          competition,
-          home: parts.home,
-          away: parts.away,
-          officials: [],
-          observer: null,
-          page: page.page
-        };
-
-        /*
-         * Mesmo que o primeiro oficial não esteja na lista,
-         * guardamos a posição.
-         */
-        current.officials.push({
-          name: listed ? listed.name : null,
-          position: 0
-        });
-
-        continue;
-      }
+      current = {
+        competition,
+        home,
+        away,
+        officials: [{ name: listed || null, position: 0 }],
+        observer: null,
+        page: page.page
+      };
+      continue;
     }
 
-    /*
-     * Caso 2:
-     * Linha apenas com um oficial:
-     *
-     * NUNO GUERRA A.F. COIMBRA
-     */
-    if (looksLikeOfficialLine(text) && current) {
-      const listed = findListedName(withoutAssociation);
-
-      const position = current.officials.length;
-
+    // Continuation lines contain only the official + association columns.
+    if (official && /^A\.?\s*F\.?/i.test(assoc) && current) {
+      const listed = findListedName(official);
       current.officials.push({
         name: listed || null,
-        position
+        position: current.officials.length
       });
-
-      continue;
     }
   }
 
