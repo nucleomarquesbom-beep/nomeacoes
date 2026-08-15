@@ -554,19 +554,31 @@ async function shieldLocalImage(team) {
 // Starts remote searches in parallel, but NEVER blocks image generation.
 function prefetchShield(team) {
   const key = 's:' + compact(team);
-  if (state.assets.has(key)) return;
-  if (state.assets.has('shieldSearch:' + compact(team))) return;
-  state.assets.set('shieldSearch:' + compact(team), true);
-  searchRemoteShield(team).catch(err => console.warn('Escudo:', team, err));
+  if (state.assets.has(key)) return Promise.resolve(state.assets.get(key));
+  const pendingKey = 'shieldSearch:' + compact(team);
+  if (state.assets.has(pendingKey)) return state.assets.get(pendingKey);
+
+  const promise = Promise.race([
+    searchRemoteShield(team),
+    new Promise(resolve => setTimeout(() => resolve(null), 5000))
+  ]).catch(err => {
+    console.warn('Escudo:', team, err);
+    return null;
+  });
+
+  state.assets.set(pendingKey, promise);
+  return promise;
 }
 
-function prefetchShields(games) {
+async function prefetchShields(games) {
   const teams = new Map();
   for (const g of games) {
     teams.set(compact(g.home), g.home);
     teams.set(compact(g.away), g.away);
   }
-  for (const team of teams.values()) prefetchShield(team);
+
+  // All teams are searched in parallel, once.
+  await Promise.all([...teams.values()].map(prefetchShield));
 }
 
 function drawContain(ctx, img, x, y, w, h) {
@@ -654,7 +666,7 @@ function fit(ctx, text, max, start, min = 24) {
   return s;
 }
 
-async function render(game) {
+function render(game) {
   const canvas = document.createElement('canvas');
   canvas.width = 1080;
   canvas.height = 1920;
@@ -706,10 +718,8 @@ async function render(game) {
 
   // IMPORTANT: rendering never performs a network request.
   // Remote searches are prefetched in the background after PDF analysis.
-  const [homeShield, awayShield] = await Promise.all([
-    shieldLocalImage(game.home),
-    shieldLocalImage(game.away)
-  ]);
+  const homeShield = state.assets.get('s:' + compact(game.home)) || null;
+  const awayShield = state.assets.get('s:' + compact(game.away)) || null;
 
   drawContain(ctx, homeShield, 130, 485, 270, 230);
   drawContain(ctx, awayShield, 680, 485, 270, 230);
@@ -736,7 +746,7 @@ async function render(game) {
     ctx.lineWidth = 2;
     ctx.stroke();
 
-    const photo = await personImage(o.name);
+    const photo = state.assets.get('p:' + compact(o.name)) || null;
 
     if (photo) {
       drawCover(ctx, photo, 75, y + 25, 220, h - 50, 18);
@@ -800,48 +810,35 @@ function showGames() {
   `).join('');
 }
 
-async function checkAssets(games) {
-  await loadIdentity();
-
+function checkAssets(games) {
   const missing = [];
   if (!state.assets.has('logo')) missing.push({ type: 'logo', key: 'logo' });
 
-  // Only local/cached assets are checked here. Remote shield searches are
-  // deliberately non-blocking and were started in the background.
-  const teamNames = [];
-  const seenTeams = new Set();
-  const personNames = [];
-  const seenPeople = new Set();
-
   for (const g of games) {
-    for (const team of [g.home, g.away]) {
-      const k = compact(team);
-      if (!seenTeams.has(k)) { seenTeams.add(k); teamNames.push(team); }
+    if (!state.assets.has('s:' + compact(g.home))) {
+      missing.push({ type: 'escudo', key: g.home });
     }
+    if (!state.assets.has('s:' + compact(g.away))) {
+      missing.push({ type: 'escudo', key: g.away });
+    }
+
     for (const o of g.officials) {
-      const k = compact(o.name);
-      if (!seenPeople.has(k)) { seenPeople.add(k); personNames.push(o.name); }
+      if (!state.assets.get('p:' + compact(o.name))) {
+        missing.push({ type: 'foto', key: o.name });
+      }
     }
   }
 
-  const [teamResults, personResults] = await Promise.all([
-    Promise.all(teamNames.map(t => shieldLocalImage(t))),
-    Promise.all(personNames.map(n => personImage(n)))
-  ]);
+  const unique = [...new Map(
+    missing.map(x => [x.type + ':' + compact(x.key), x])
+  ).values()];
 
-  teamNames.forEach((team, i) => {
-    if (!teamResults[i] && !state.assets.has('s:' + compact(team))) {
-      // Do not block generation. The background search may still be running.
-      prefetchShield(team);
-    }
-  });
+  // Photos/logo remain mandatory. Missing shields are reported but do not
+  // trigger any network operation here.
+  const mandatory = unique.filter(x => x.type !== 'escudo');
 
-  personNames.forEach((name, i) => {
-    if (!personResults[i]) missing.push({ type: 'foto', key: name });
-  });
-
-  if (missing.length) {
-    renderMissing(missing);
+  if (mandatory.length) {
+    renderMissing(mandatory);
     return false;
   }
 
@@ -958,14 +955,30 @@ async function analyze() {
 
     showGames();
 
-    // Start all shield searches simultaneously while the user reviews the results.
-    // This keeps the Generate button responsive and avoids one-request-per-JPG delays.
-    prefetchShields(state.games);
+    setStatus(
+      `PDF lido: ${data.numPages} página(s). Encontrados ${state.games.length} jogo(s). A preparar os escudos uma única vez...`
+    );
+
+    await prefetchShields(state.games);
 
     $('generateBtn').disabled = false;
 
+    const missingShields = [];
+    const seen = new Set();
+    for (const g of state.games) {
+      for (const team of [g.home, g.away]) {
+        const k = compact(team);
+        if (!seen.has(k)) {
+          seen.add(k);
+          if (!state.assets.has('s:' + k)) missingShields.push(team);
+        }
+      }
+    }
+
     setStatus(
-      `PDF lido: ${data.numPages} página(s). Encontrados ${state.games.length} jogo(s).`
+      missingShields.length
+        ? `Pronto. ${state.games.length} jogo(s) preparados. ${missingShields.length} escudo(s) não foram encontrados automaticamente.`
+        : `Pronto. ${state.games.length} jogo(s) preparados. Todos os escudos estão em memória. A geração dos JPG não faz pesquisas.`
     );
   } catch (e) {
     console.error(e);
@@ -978,37 +991,34 @@ async function analyze() {
 async function generateAll() {
   if (!state.games.length) return;
 
-  const ok = await checkAssets(state.games);
-  if (!ok) return;
+  // No network, no shield search, no image probing here.
+  if (!checkAssets(state.games)) return;
 
-  prefetchShields(state.games);
   setStatus('A gerar os JPG...');
 
   const zip = new JSZip();
 
-  for (const g of state.games) {
-    const canvas = await render(g);
+  for (let i = 0; i < state.games.length; i++) {
+    const g = state.games[i];
+    const canvas = render(g);
 
     const blob = await new Promise(
-      r => canvas.toBlob(r, 'image/jpeg', .96)
+      resolve => canvas.toBlob(resolve, 'image/jpeg', .94)
     );
 
     zip.file(
-      safeFile(`${g.home} - ${g.away}.jpg`).slice(0, 150),
+      safeFile(`${String(i + 1).padStart(2, '0')} - ${g.home} - ${g.away}.jpg`).slice(0, 150),
       blob
     );
+
+    setStatus(`A gerar JPG ${i + 1}/${state.games.length}...`);
   }
 
-  const blob = await zip.generateAsync({ type: 'blob' });
+  const blob = await zip.generateAsync({ type: 'blob', streamFiles: true });
 
-  download(
-    blob,
-    'Nomeacoes_Marques_Bom.zip'
-  );
+  download(blob, 'Nomeacoes_Marques_Bom.zip');
 
-  setStatus(
-    `Concluído: ${state.games.length} JPG(s) gerados.`
-  );
+  setStatus(`Concluído: ${state.games.length} JPG(s) gerados.`);
 }
 
 async function generateManual() {
@@ -1051,7 +1061,7 @@ async function generateManual() {
   const ok = await checkAssets([g]);
   if (!ok) return;
 
-  const canvas = await render(g);
+  const canvas = render(g);
 
   const blob = await new Promise(
     r => canvas.toBlob(r, 'image/jpeg', .96)
