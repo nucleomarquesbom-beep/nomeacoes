@@ -533,20 +533,14 @@ async function searchRemoteShield(team) {
   }
 }
 
-async function shieldImage(team) {
+async function shieldLocalImage(team) {
   const key = 's:' + compact(team);
+  if (state.assets.has(key)) return state.assets.get(key);
 
-  if (state.assets.has(key)) {
-    return state.assets.get(key);
-  }
-
-  // 1) First use a local file if the Núcleo has supplied one.
   for (const v of teamVariants(team)) {
     const f = safeFile(v);
-
     for (const ext of ['png', 'jpg', 'jpeg', 'webp']) {
-      const img = await tryImage(`/escudos/${f}.${ext}?v=3`);
-
+      const img = await tryImage(`/escudos/${f}.${ext}?v=4`);
       if (img) {
         state.assets.set(key, img);
         state.assets.set('source:' + compact(team), 'Biblioteca local do Núcleo');
@@ -554,9 +548,25 @@ async function shieldImage(team) {
       }
     }
   }
+  return null;
+}
 
-  // 2) If there is no local file, search automatically.
-  return searchRemoteShield(team);
+// Starts remote searches in parallel, but NEVER blocks image generation.
+function prefetchShield(team) {
+  const key = 's:' + compact(team);
+  if (state.assets.has(key)) return;
+  if (state.assets.has('shieldSearch:' + compact(team))) return;
+  state.assets.set('shieldSearch:' + compact(team), true);
+  searchRemoteShield(team).catch(err => console.warn('Escudo:', team, err));
+}
+
+function prefetchShields(games) {
+  const teams = new Map();
+  for (const g of games) {
+    teams.set(compact(g.home), g.home);
+    teams.set(compact(g.away), g.away);
+  }
+  for (const team of teams.values()) prefetchShield(team);
 }
 
 function drawContain(ctx, img, x, y, w, h) {
@@ -694,9 +704,11 @@ async function render(game) {
   ctx.fillText('VS', 540, 450);
   ctx.textAlign = 'left';
 
+  // IMPORTANT: rendering never performs a network request.
+  // Remote searches are prefetched in the background after PDF analysis.
   const [homeShield, awayShield] = await Promise.all([
-    shieldImage(game.home),
-    shieldImage(game.away)
+    shieldLocalImage(game.home),
+    shieldLocalImage(game.away)
   ]);
 
   drawContain(ctx, homeShield, 130, 485, 270, 230);
@@ -792,28 +804,41 @@ async function checkAssets(games) {
   await loadIdentity();
 
   const missing = [];
+  if (!state.assets.has('logo')) missing.push({ type: 'logo', key: 'logo' });
 
-  if (!state.assets.has('logo')) {
-    missing.push({ type: 'logo', key: 'logo' });
-  }
+  // Only local/cached assets are checked here. Remote shield searches are
+  // deliberately non-blocking and were started in the background.
+  const teamNames = [];
+  const seenTeams = new Set();
+  const personNames = [];
+  const seenPeople = new Set();
 
-  // Escudos are now searched automatically. A missing shield is only
-  // reported after local + remote search has failed.
   for (const g of games) {
-    if (!await shieldImage(g.home)) {
-      missing.push({ type: 'escudo', key: g.home });
+    for (const team of [g.home, g.away]) {
+      const k = compact(team);
+      if (!seenTeams.has(k)) { seenTeams.add(k); teamNames.push(team); }
     }
-
-    if (!await shieldImage(g.away)) {
-      missing.push({ type: 'escudo', key: g.away });
-    }
-
     for (const o of g.officials) {
-      if (!await personImage(o.name)) {
-        missing.push({ type: 'foto', key: o.name });
-      }
+      const k = compact(o.name);
+      if (!seenPeople.has(k)) { seenPeople.add(k); personNames.push(o.name); }
     }
   }
+
+  const [teamResults, personResults] = await Promise.all([
+    Promise.all(teamNames.map(t => shieldLocalImage(t))),
+    Promise.all(personNames.map(n => personImage(n)))
+  ]);
+
+  teamNames.forEach((team, i) => {
+    if (!teamResults[i] && !state.assets.has('s:' + compact(team))) {
+      // Do not block generation. The background search may still be running.
+      prefetchShield(team);
+    }
+  });
+
+  personNames.forEach((name, i) => {
+    if (!personResults[i]) missing.push({ type: 'foto', key: name });
+  });
 
   if (missing.length) {
     renderMissing(missing);
@@ -933,6 +958,10 @@ async function analyze() {
 
     showGames();
 
+    // Start all shield searches simultaneously while the user reviews the results.
+    // This keeps the Generate button responsive and avoids one-request-per-JPG delays.
+    prefetchShields(state.games);
+
     $('generateBtn').disabled = false;
 
     setStatus(
@@ -952,6 +981,7 @@ async function generateAll() {
   const ok = await checkAssets(state.games);
   if (!ok) return;
 
+  prefetchShields(state.games);
   setStatus('A gerar os JPG...');
 
   const zip = new JSZip();
