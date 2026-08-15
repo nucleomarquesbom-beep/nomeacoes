@@ -506,6 +506,41 @@ function teamVariants(team) {
   return [...a].filter(Boolean);
 }
 
+async function searchRemoteShield(team) {
+  const key = 'remoteShield:' + compact(team);
+
+  if (state.assets.has(key)) {
+    return state.assets.get(key);
+  }
+
+  try {
+    const r = await fetch(`/api/escudo?team=${encodeURIComponent(team)}`, {
+      headers: { 'Accept': 'application/json' }
+    });
+
+    if (!r.ok) return null;
+
+    const data = await r.json();
+
+    if (!data?.imageUrl) return null;
+
+    const img = await tryImage(data.imageUrl);
+
+    if (!img) return null;
+
+    state.assets.set(key, img);
+    state.assets.set('s:' + compact(team), img);
+
+    // Keep the source for the final image metadata/traceability.
+    state.assets.set('source:' + compact(team), data.source || '');
+
+    return img;
+  } catch (e) {
+    console.warn('Pesquisa automática de escudo falhou:', team, e);
+    return null;
+  }
+}
+
 async function shieldImage(team) {
   const key = 's:' + compact(team);
 
@@ -513,20 +548,23 @@ async function shieldImage(team) {
     return state.assets.get(key);
   }
 
+  // 1) First use a local file if the Núcleo has supplied one.
   for (const v of teamVariants(team)) {
     const f = safeFile(v);
 
     for (const ext of ['png', 'jpg', 'jpeg', 'webp']) {
-      const img = await tryImage(`/escudos/${f}.${ext}?v=2`);
+      const img = await tryImage(`/escudos/${f}.${ext}?v=3`);
 
       if (img) {
         state.assets.set(key, img);
+        state.assets.set('source:' + compact(team), 'Biblioteca local do Núcleo');
         return img;
       }
     }
   }
 
-  return null;
+  // 2) If there is no local file, search automatically.
+  return searchRemoteShield(team);
 }
 
 function drawContain(ctx, img, x, y, w, h) {
@@ -767,6 +805,8 @@ async function checkAssets(games) {
     missing.push({ type: 'logo', key: 'logo' });
   }
 
+  // Escudos are now searched automatically. A missing shield is only
+  // reported after local + remote search has failed.
   for (const g of games) {
     if (!await shieldImage(g.home)) {
       missing.push({ type: 'escudo', key: g.home });
