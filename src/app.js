@@ -810,25 +810,36 @@ async function checkAssets(games) {
   await loadIdentity();
 
   const missing = [];
+  const crestFailures = [];
 
   if (!state.assets.has('logo')) {
     missing.push({ type: 'logo', key: 'logo' });
   }
 
   for (const g of games) {
-    if (!await shieldImage(g.home)) {
-      missing.push({ type: 'escudo', key: g.home });
-    }
+    const home = await shieldImage(g.home);
+    if (!home) crestFailures.push(g.home);
 
-    if (!await shieldImage(g.away)) {
-      missing.push({ type: 'escudo', key: g.away });
-    }
+    const away = await shieldImage(g.away);
+    if (!away) crestFailures.push(g.away);
 
     for (const o of g.officials) {
       if (!await personImage(o.name)) {
         missing.push({ type: 'foto', key: o.name });
       }
     }
+  }
+
+  // Escudos são sempre pesquisados automaticamente. Nunca pedir ao utilizador
+  // para carregar um escudo. Se uma pesquisa falhar, bloqueamos a geração com
+  // uma mensagem clara para que não seja criada uma publicação incompleta.
+  const uniqueCrests = [...new Set(crestFailures)];
+  if (uniqueCrests.length) {
+    renderMissing([
+      ...missing,
+      ...uniqueCrests.map(key => ({ type: 'escudo_online', key }))
+    ]);
+    return false;
   }
 
   if (missing.length) {
@@ -851,8 +862,8 @@ function renderMissing(items) {
 
   $('missingAssets').innerHTML = `
     <div class="missingBox">
-      <h3>Faltam ficheiros antes de gerar</h3>
-      <p>O gerador bloqueia a criação para não sair uma publicação incompleta.</p>
+      <h3>Verificação de imagens</h3>
+      <p>Os escudos são procurados automaticamente online. Não precisas de os carregar.</p>
       ${unique.map(x => `
         <div class="missingRow">
           <span>
@@ -864,11 +875,9 @@ function renderMissing(items) {
                   : 'Logo'
             }</b>: ${escapeHtml(x.key)}
           </span>
-          <input
-            type="file"
-            accept="image/png,image/jpeg,image/webp"
-            data-key="${escapeHtml(x.type + '|' + x.key)}"
-          >
+          ${x.type === 'escudo_online'
+            ? '<span class="onlineSearch">Pesquisa automática online concluída sem resultado</span>'
+            : `<input type="file" accept="image/png,image/jpeg,image/webp" data-key="${escapeHtml(x.type + '|' + x.key)}">` }
         </div>
       `).join('')}
       <button id="useMissing" class="secondary">
