@@ -686,65 +686,128 @@ function roundRect(ctx, x, y, w, h, r, fill, stroke = null, lineWidth = 1) {
   }
 }
 
+function displayCompetition(competition = '') {
+  const n = normalizeText(competition);
+  let title = competition.trim();
+  let detail = '';
+
+  if (n.includes('liga 3')) {
+    title = 'LIGA 3';
+    detail = competition.replace(/.*?liga\s*3\s*/i, '').replace(/^[-–—•|]+\s*/, '').trim();
+  } else if (n.includes('liga placard')) {
+    title = 'LIGA PLACARD';
+    detail = competition.replace(/.*?liga\s*placard\s*/i, '').replace(/^[-–—•|]+\s*/, '').trim();
+  } else if (n.includes('liga bpi')) {
+    title = 'LIGA BPI';
+    detail = competition.replace(/.*?liga\s*bpi\s*/i, '').replace(/^[-–—•|]+\s*/, '').trim();
+  } else if (n.includes('supertaca')) {
+    title = 'SUPERTAÇA';
+    detail = competition.replace(/.*?supertaca\s*/i, '').replace(/^[-–—•|]+\s*/, '').trim();
+  } else {
+    const parts = competition.split(/\s+-\s+/);
+    if (parts.length > 1) {
+      title = parts.shift().trim();
+      detail = parts.join(' • ').trim();
+    }
+  }
+
+  return { title, detail };
+}
+
+function drawGoldLine(ctx, x1, y, x2) {
+  ctx.strokeStyle = '#e7b63d';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(x1, y);
+  ctx.lineTo(x2, y);
+  ctx.stroke();
+  ctx.fillStyle = '#e7b63d';
+  ctx.fillRect((x1 + x2) / 2 - 24, y - 4, 48, 8);
+}
+
 function drawTeamBlock(ctx, game, homeShield, awayShield) {
-  const x = 55, y = 350, w = 970, h = 315;
-
-  roundRect(ctx, x, y, w, h, 28, 'rgba(8,20,27,.70)', 'rgba(231,182,61,.65)', 2);
-
-  // Escudos: objetos independentes, centrados dentro das suas áreas.
-  drawContain(ctx, homeShield, 95, y + 48, 180, 180);
-  drawContain(ctx, awayShield, 805, y + 48, 180, 180);
+  const y = 500;
 
   ctx.textAlign = 'center';
   ctx.fillStyle = '#e7b63d';
-  ctx.font = '700 34px Arial';
-  ctx.fillText('VS', 540, y + 128);
+  ctx.font = '700 74px Arial';
+  ctx.fillText('VS', 540, y + 145);
+
+  ctx.strokeStyle = 'rgba(231,182,61,.8)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(390, y + 35); ctx.lineTo(390, y + 265);
+  ctx.moveTo(690, y + 35); ctx.lineTo(690, y + 265);
+  ctx.stroke();
+
+  drawContain(ctx, homeShield, 120, y + 10, 210, 180);
+  drawContain(ctx, awayShield, 750, y + 10, 210, 180);
 
   ctx.fillStyle = '#f5f7f8';
-  const homeSize = fit(ctx, game.home, 480, 38, 24);
+  const homeSize = fit(ctx, game.home, 320, 34, 22);
   ctx.font = `700 ${homeSize}px Arial`;
-  wrap(ctx, game.home, 540, y + 205, 480, homeSize + 7, 2);
+  wrap(ctx, game.home, 255, y + 220, 320, homeSize + 8, 2);
 
-  const awaySize = fit(ctx, game.away, 480, 38, 24);
+  const awaySize = fit(ctx, game.away, 320, 34, 22);
   ctx.font = `700 ${awaySize}px Arial`;
-  wrap(ctx, game.away, 540, y + 265, 480, awaySize + 7, 2);
+  wrap(ctx, game.away, 825, y + 220, 320, awaySize + 8, 2);
+}
 
+function drawMatchInfo(ctx, game) {
+  const date = game.date || game.matchDate || '';
+  const time = game.time || game.matchTime || '';
+  const venue = game.venue || game.stadium || '';
+  if (!date && !time && !venue) return;
+
+  drawGoldLine(ctx, 115, 800, 965);
   ctx.textAlign = 'left';
+  ctx.fillStyle = '#f5f7f8';
+  ctx.font = '700 25px Arial';
+
+  if (date) ctx.fillText('▣  ' + date, 130, 850);
+  if (time) ctx.fillText('◷  ' + time, 430, 850);
+  if (venue) {
+    ctx.font = '700 22px Arial';
+    wrap(ctx, '◉  ' + venue, 650, 840, 300, 28, 2);
+  }
 }
 
 function drawOfficialCard(ctx, official, x, y, w, h) {
-  roundRect(ctx, x, y, w, h, 24, 'rgba(8,20,27,.78)', 'rgba(231,182,61,.48)', 2);
+  roundRect(ctx, x, y, w, h, 26, 'rgba(8,20,27,.68)', 'rgba(231,182,61,.75)', 2);
 
-  const pad = 22;
-  const photoW = Math.min(245, w * 0.34);
+  const pad = Math.max(14, Math.min(24, h * 0.08));
+  const photoH = h - pad * 2;
+  const photoW = Math.min(photoH * 1.05, w * 0.25);
   const photoX = x + pad;
   const photoY = y + pad;
-  const photoH = h - pad * 2;
 
-  // Moldura branca da fotografia — a fotografia é colocada DENTRO da caixa.
   ctx.fillStyle = '#f5f5f0';
   ctx.fillRect(photoX, photoY, photoW, photoH);
 
   const photo = state.assets.get('p:' + compact(official.name)) || null;
   if (photo) {
-    drawCover(ctx, photo, photoX + 10, photoY + 10, photoW - 20, photoH - 20, 4);
+    drawCover(ctx, photo, photoX + 9, photoY + 9, photoW - 18, photoH - 18, 3);
   } else {
     ctx.fillStyle = '#5e7078';
-    ctx.fillRect(photoX + 10, photoY + 10, photoW - 20, photoH - 20);
+    ctx.fillRect(photoX + 9, photoY + 9, photoW - 18, photoH - 18);
   }
 
-  const textX = photoX + photoW + 35;
+  const textX = photoX + photoW + 42;
   const textW = x + w - textX - 28;
 
   ctx.textAlign = 'left';
   ctx.fillStyle = '#e7b63d';
-  ctx.font = `700 ${Math.max(20, Math.min(29, h / 10))}px Arial`;
-  ctx.fillText(official.role.toUpperCase(), textX, y + 62);
+  ctx.font = `700 ${Math.max(18, Math.min(28, h / 8))}px Arial`;
+  ctx.fillText(official.role.toUpperCase(), textX, y + h * 0.34);
 
   ctx.fillStyle = '#f5f7f8';
-  const nameSize = fit(ctx, official.name, textW, h > 300 ? 50 : 38, 22);
+  const nameSize = fit(ctx, official.name, textW, Math.max(30, Math.min(52, h * 0.18)), 20);
   ctx.font = `700 ${nameSize}px Arial`;
-  wrap(ctx, official.name, textX, y + 130, textW, nameSize + 7, 2);
+  wrap(ctx, official.name.toUpperCase(), textX, y + h * 0.58, textW, nameSize + 5, 2);
+
+  ctx.fillStyle = '#e7b63d';
+  ctx.font = `700 ${Math.max(17, Math.min(25, h / 9))}px Arial`;
+  ctx.fillText('A.F. COIMBRA', textX, y + h * 0.80);
 }
 
 function render(game) {
@@ -753,74 +816,75 @@ function render(game) {
   canvas.height = 1920;
   const ctx = canvas.getContext('2d');
 
-  // A BASE É A IMAGEM DO NÚCLEO. Não se desenha outro logo nem se recria
-  // o cabeçalho: tudo o que já existe na base fica intacto.
   const bg = state.assets.get('background');
-  if (bg) {
-    ctx.drawImage(bg, 0, 0, 1080, 1920);
-  } else {
-    ctx.fillStyle = '#1d2b32';
+  if (bg) ctx.drawImage(bg, 0, 0, 1080, 1920);
+  else {
+    ctx.fillStyle = '#10222b';
     ctx.fillRect(0, 0, 1080, 1920);
   }
 
   const homeShield = state.assets.get('s:' + compact(game.home)) || null;
   const awayShield = state.assets.get('s:' + compact(game.away)) || null;
 
-  // Hashtag — elemento variável, sem interferir no logo do fundo.
+  // O fundo já contém o cabeçalho e o logo original. Aqui apenas entram os dados.
   ctx.textAlign = 'center';
   ctx.fillStyle = '#f5f7f8';
-  ctx.font = '700 30px Arial';
-  ctx.fillText('#TambemEstamosEmJogo', 540, 145);
-
-  // Competição: título forte, mas com espaço reservado para múltiplas linhas.
+  ctx.font = '700 58px Arial';
+  ctx.fillText('#', 278, 168);
+  ctx.fillStyle = '#f5f7f8';
+  ctx.font = '700 italic 54px Arial';
+  ctx.fillText('TambemEstamos', 500, 168);
   ctx.fillStyle = '#e7b63d';
-  const compSize = fit(ctx, game.competition, 920, 42, 24);
-  ctx.font = `700 ${compSize}px Arial`;
-  wrap(ctx, game.competition, 540, 230, 920, compSize + 8, 3);
+  ctx.font = '700 italic 54px Arial';
+  ctx.fillText('EmJogo', 725, 168);
 
-  drawTeamBlock(ctx, game, homeShield, awayShield);
+  const comp = displayCompetition(game.competition);
+  ctx.fillStyle = '#e7b63d';
+  ctx.font = '700 24px Arial';
+  ctx.fillText('COMPETIÇÃO', 540, 245);
 
-  const count = game.officials.length;
-
-  // A composição adapta-se ao número de pessoas. Não há sobreposição nem
-  // uma simples escrita sobre a fotografia/base.
-  if (count <= 2) {
-    const cardH = count === 1 ? 470 : 335;
-    const gap = 24;
-    const total = count * cardH + (count - 1) * gap;
-    let y = 715;
-    if (total > 1040) y = 700;
-
-    for (const official of game.officials) {
-      drawOfficialCard(ctx, official, 55, y, 970, cardH);
-      y += cardH + gap;
+  ctx.fillStyle = '#f5f7f8';
+  const titleSize = fit(ctx, comp.title, 900, 110, 54);
+  ctx.font = `900 ${titleSize}px Arial`;
+  ctx.fillText(comp.title, 430, 355);
+  if (/\d/.test(comp.title)) {
+    // Give the last numeric character the Núcleo gold treatment.
+    const m = comp.title.match(/^(.*?)(\d+)$/);
+    if (m) {
+      const left = m[1], num = m[2];
+      const leftW = ctx.measureText(left).width;
+      const numW = ctx.measureText(num).width;
+      ctx.fillStyle = '#f5f7f8';
+      ctx.fillText(left, 540 - (leftW + numW) / 2 + leftW / 2, 355);
+      ctx.fillStyle = '#e7b63d';
+      ctx.fillText(num, 540 + (leftW + numW) / 2 - numW / 2, 355);
     }
-  } else {
-    const gap = 24;
-    const cardW = 473;
-    const cardH = count === 3 ? 360 : 330;
-    const positions = [
-      [55, 715], [552, 715],
-      [55, 715 + cardH + gap], [552, 715 + cardH + gap]
-    ];
-
-    game.officials.slice(0, 4).forEach((official, i) => {
-      const [x, y] = positions[i];
-      drawOfficialCard(ctx, official, x, y, cardW, cardH);
-    });
   }
 
-  // Rodapé limpo, sem segundo logo.
+  drawGoldLine(ctx, 300, 405, 780);
+  ctx.fillStyle = '#f5f7f8';
+  ctx.font = `700 ${fit(ctx, comp.detail || game.competition, 900, 25, 16)}px Arial`;
+  ctx.fillText(comp.detail || '', 540, 455);
+
+  drawTeamBlock(ctx, game, homeShield, awayShield);
+  drawMatchInfo(ctx, game);
+
+  const count = Math.max(1, Math.min(game.officials.length, 4));
+  let top = (game.date || game.matchDate || game.time || game.matchTime || game.venue || game.stadium) ? 870 : 820;
+  const bottom = 1770;
+  const gap = 14;
+  const cardH = Math.floor((bottom - top - gap * (count - 1)) / count);
+
+  game.officials.slice(0, 4).forEach((official, i) => {
+    drawOfficialCard(ctx, official, 105, top + i * (cardH + gap), 870, cardH);
+  });
+
+  drawGoldLine(ctx, 130, 1810, 950);
   ctx.textAlign = 'center';
   ctx.fillStyle = '#f5f7f8';
-  ctx.font = '700 24px Arial';
-  ctx.fillText('TRABALHO, COMPETÊNCIA E DEDICAÇÃO', 540, 1780);
+  ctx.font = '700 23px Arial';
+  ctx.fillText('TRABALHO  •  COMPETÊNCIA  •  DEDICAÇÃO', 540, 1860);
 
-  ctx.fillStyle = '#e7b63d';
-  ctx.font = '700 17px Arial';
-  ctx.fillText('#TambemEstamosEmJogo', 540, 1820);
-
-  ctx.textAlign = 'left';
   return canvas;
 }
 
