@@ -7,10 +7,6 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
 const $ = id => document.getElementById(id);
 const state = { pages: [], games: [], names: new Map(), assets: new Map() };
 
-// Colunas reais do PDF FPF: Jogo | Árbitro | Associação.
-const PDF_GAME_MAX_X = 280;
-const PDF_OFFICIAL_MAX_X = 469;
-
 function normalizeText(v = '') {
   return String(v).toLowerCase()
     .normalize('NFD')
@@ -246,11 +242,42 @@ function finalizeGame(current) {
  * O primeiro continua a ocupar a posição 0 e Nuno a posição 1,
  * logo Nuno = 4.º Árbitro.
  */
+function headerAnchors(items) {
+  const a = { game: null, official: null, assoc: null };
+  for (const it of items) {
+    const n = normalizeText(it.text);
+    if (n === 'jogo') a.game = it.x;
+    else if (n === 'arbitro') a.official = it.x;
+    else if (n === 'associacao') a.assoc = it.x;
+  }
+  return a;
+}
+
+function columnText(line, anchors) {
+  const out = { game: [], official: [], assoc: [] };
+  if (anchors.game == null || anchors.official == null || anchors.assoc == null) return out;
+
+  for (const it of line.items) {
+    const candidates = [
+      ['game', Math.abs(it.x - anchors.game)],
+      ['official', Math.abs(it.x - anchors.official)],
+      ['assoc', Math.abs(it.x - anchors.assoc)]
+    ].sort((a, b) => a[1] - b[1]);
+    out[candidates[0][0]].push(it.text);
+  }
+  return {
+    game: out.game.join(' ').replace(/\s+/g, ' ').trim(),
+    official: out.official.join(' ').replace(/\s+/g, ' ').trim(),
+    assoc: out.assoc.join(' ').replace(/\s+/g, ' ').trim()
+  };
+}
+
 function parsePage(page) {
   const games = [];
   let competition = '';
   let current = null;
   let table = false;
+  let anchors = null;
 
   function pushCurrent() {
     const game = finalizeGame(current);
@@ -259,11 +286,13 @@ function parsePage(page) {
   }
 
   for (let i = 0; i < page.lines.length; i++) {
-    const text = page.lines[i].text.trim();
+    const line = page.lines[i];
+    const text = line.text.trim();
     if (!text) continue;
 
     if (isHeader(text)) {
       pushCurrent();
+      anchors = headerAnchors(line.items);
       table = true;
       continue;
     }
@@ -276,12 +305,15 @@ function parsePage(page) {
     if (isMeta(text)) {
       pushCurrent();
       table = false;
+      anchors = null;
       continue;
     }
 
     if (isCompetition(text) && !hasAssociation(text)) {
       pushCurrent();
       competition = text;
+      table = false;
+      anchors = null;
       continue;
     }
 
@@ -295,125 +327,45 @@ function parsePage(page) {
     }
 
     if (isVAR(text)) continue;
-
     if (!hasAssociation(text)) continue;
 
-    const withoutAssociation = removeAssociation(text);
-    const listed = findListedInText(withoutAssociation);
+    const cols = columnText(line, anchors);
+    const assoc = cols.assoc || '';
+    const official = cols.official || '';
+    const gameText = cols.game || '';
 
-    /*
-     * CASO 1 — jogo + primeiro oficial.
-     * As coordenadas separam as colunas; a procura do árbitro é feita
-     * primeiro na coluna Árbitro e depois, como fallback, na linha.
-     */
-    if (looksLikeGameLine(text)) {
-      const items = page.lines[i].items || [];
+    // FPF's table has a fixed semantic boundary: the game is under "Jogo",
+    // the referee under "Árbitro", and the association under "Associação".
+    // This is much safer than trying to guess where a team name ends from
+    // the concatenated text string.
+    if (gameText.includes(' - ') && official && /^A\.?\s*F\.?/i.test(assoc)) {
+      pushCurrent();
 
-      const gameItems = items
-        .filter(it => it.x < PDF_GAME_MAX_X)
-        .sort((a, b) => a.x - b.x);
+      const dash = gameText.lastIndexOf(' - ');
+      const home = gameText.slice(0, dash).trim();
+      const away = gameText.slice(dash + 3).trim();
+      let listed = findListedName(official);
+      if (!listed) listed = findListedName(removeAssociation(text));
 
-      const officialItems = items
-        .filter(it => it.x >= PDF_GAME_MAX_X && it.x < PDF_OFFICIAL_MAX_X)
-        .sort((a, b) => a.x - b.x);
-
-      const gameText = gameItems.map(it => it.text).join(' ')
-        .replace(/\s+/g, ' ').trim();
-
-      const officialText = officialItems.map(it => it.text).join(' ')
-        .replace(/\s+/g, ' ').trim();
-
-      const parts = splitGamePrefix(gameText);
-
-      if (parts) {
-        pushCurrent();
-
-        // Primeiro: apenas a coluna do árbitro.
-        let listedFirst = findListedName(officialText);
-
-        // Fallback: linha completa, mas sem associação.
-        if (!listedFirst) {
-          listedFirst = findListedName(removeAssociation(text));
-        }
-
-        current = {
-          competition,
-          home: parts.home,
-          away: parts.away,
-          officials: [{
-            name: listedFirst || null,
-            position: 0
-          }],
-          observer: null,
-          page: page.page
-        };
-
-        continue;
-      }
-
-      // Fallback para PDFs com coordenadas diferentes.
-      const fallbackListed = findListedInText(removeAssociation(text));
-
-      if (fallbackListed) {
-        const line = normalizeText(removeAssociation(text));
-        const name = normalizeText(fallbackListed.name);
-        const p = line.indexOf(name);
-
-        if (p >= 0) {
-          const before = removeAssociation(text).slice(0, p);
-          const fallbackParts = splitGamePrefix(before);
-
-          if (fallbackParts) {
-            pushCurrent();
-
-            current = {
-              competition,
-              home: fallbackParts.home,
-              away: fallbackParts.away,
-              officials: [{
-                name: fallbackListed.name,
-                position: 0
-              }],
-              observer: null,
-              page: page.page
-            };
-
-            continue;
-          }
-        }
-      }
+      current = {
+        competition,
+        home,
+        away,
+        officials: [{ name: listed || null, position: 0 }],
+        observer: null,
+        page: page.page
+      };
+      continue;
     }
 
-    /*
-     * Caso 2:
-     * Linha apenas com um oficial:
-     *
-     * NUNO GUERRA A.F. COIMBRA
-     */
-    if (looksLikeOfficialLine(text) && current) {
-      const items = page.lines[i].items || [];
-
-      const officialItems = items
-        .filter(it => it.x >= PDF_GAME_MAX_X && it.x < PDF_OFFICIAL_MAX_X)
-        .sort((a, b) => a.x - b.x);
-
-      const officialText = officialItems.map(it => it.text).join(' ')
-        .replace(/\s+/g, ' ').trim();
-
-      let listed = findListedName(officialText);
-
-      if (!listed) {
-        listed = findListedName(withoutAssociation);
-      }
-
-      const position = current.officials.length;
-
+    // Continuation lines contain only the official + association columns.
+    if (official && /^A\.?\s*F\.?/i.test(assoc) && current) {
+      let listed = findListedName(official);
+      if (!listed) listed = findListedName(withoutAssociation);
       current.officials.push({
         name: listed || null,
-        position
+        position: current.officials.length
       });
-
-      continue;
     }
   }
 
@@ -486,6 +438,7 @@ async function extractPDF(file) {
 function tryImage(url) {
   return new Promise(resolve => {
     const img = new Image();
+    img.crossOrigin = 'anonymous';
     img.onload = () => resolve(img);
     img.onerror = () => resolve(null);
     img.src = url;
@@ -540,36 +493,101 @@ async function personImage(name) {
 }
 
 function teamVariants(team) {
-  const a = new Set([
-    team.trim(),
-    team.replace(/\bSAD\b/ig, '').replace(/\bSDUQ\b/ig, '').trim(),
-    team.replace(/[,.]/g, '').trim()
-  ]);
+  const original = String(team || '').trim();
+  const legalClean = original
+    .replace(/(?:\s+|\/)OAF\s+SDUQ\s*$/i, '')
+    .replace(/(?:\s+|\/)(?:SAD|SDUQ|OAF)\s*$/i, '')
+    .replace(/\s+/g, ' ')
+    .trim();
 
-  return [...a].filter(Boolean);
+  const variants = new Set([
+    original,
+    legalClean,
+    original.replace(/[,.]/g, '').trim(),
+    legalClean.replace(/[,.]/g, '').trim()
+  ]);
+  return [...variants].filter(Boolean);
 }
 
-async function shieldImage(team) {
-  const key = 's:' + compact(team);
+async function searchRemoteShield(team, timeoutMs = 4500) {
+  const key = 'remoteShield:' + compact(team);
+  const cached = state.assets.get(key);
+  if (cached) return cached;
 
-  if (state.assets.has(key)) {
-    return state.assets.get(key);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const r = await fetch(`/api/escudo?team=${encodeURIComponent(team)}`, {
+      headers: { 'Accept': 'application/json' },
+      signal: controller.signal
+    });
+    if (!r.ok) return null;
+
+    const data = await r.json();
+    const imageSrc = data?.imageDataUrl;
+    if (!imageSrc) return null;
+
+    const img = await tryImage(imageSrc);
+    if (!img) return null;
+
+    state.assets.set(key, img);
+    state.assets.set('s:' + compact(team), img);
+    state.assets.set('source:' + compact(team), data.source || '');
+    return img;
+  } catch (e) {
+    if (e?.name !== 'AbortError') {
+      console.warn('Pesquisa automática de escudo falhou:', team, e);
+    }
+    return null;
+  } finally {
+    clearTimeout(timer);
   }
+}
+
+async function shieldLocalImage(team) {
+  const key = 's:' + compact(team);
+  if (state.assets.has(key)) return state.assets.get(key);
 
   for (const v of teamVariants(team)) {
     const f = safeFile(v);
-
+    // The normal repository convention is PNG first. This avoids four
+    // unnecessary failed requests for the common case.
     for (const ext of ['png', 'jpg', 'jpeg', 'webp']) {
-      const img = await tryImage(`/escudos/${f}.${ext}?v=2`);
-
+      const img = await tryImage(`/escudos/${f}.${ext}?v=5`);
       if (img) {
         state.assets.set(key, img);
+        state.assets.set('source:' + compact(team), 'Biblioteca local do Núcleo');
         return img;
       }
     }
   }
-
   return null;
+}
+
+async function prepareOneShield(team) {
+  if (await shieldLocalImage(team)) return true;
+  return !!(await searchRemoteShield(team));
+}
+
+async function prefetchShields(games) {
+  const teams = new Map();
+  for (const g of games) {
+    teams.set(compact(g.home), g.home);
+    teams.set(compact(g.away), g.away);
+  }
+
+  const uniqueTeams = [...teams.values()];
+  const started = performance.now();
+
+  // All teams in parallel. No sequential club-by-club wait.
+  await Promise.all(uniqueTeams.map(team => prepareOneShield(team)));
+
+  return {
+    total: uniqueTeams.length,
+    found: uniqueTeams.filter(team => state.assets.has('s:' + compact(team))).length,
+    seconds: (performance.now() - started) / 1000
+  };
 }
 
 function drawContain(ctx, img, x, y, w, h) {
@@ -657,7 +675,7 @@ function fit(ctx, text, max, start, min = 24) {
   return s;
 }
 
-async function render(game) {
+function render(game) {
   const canvas = document.createElement('canvas');
   canvas.width = 1080;
   canvas.height = 1920;
@@ -707,10 +725,10 @@ async function render(game) {
   ctx.fillText('VS', 540, 450);
   ctx.textAlign = 'left';
 
-  const [homeShield, awayShield] = await Promise.all([
-    shieldImage(game.home),
-    shieldImage(game.away)
-  ]);
+  // IMPORTANT: rendering never performs a network request.
+  // Remote searches are prefetched in the background after PDF analysis.
+  const homeShield = state.assets.get('s:' + compact(game.home)) || null;
+  const awayShield = state.assets.get('s:' + compact(game.away)) || null;
 
   drawContain(ctx, homeShield, 130, 485, 270, 230);
   drawContain(ctx, awayShield, 680, 485, 270, 230);
@@ -737,7 +755,7 @@ async function render(game) {
     ctx.lineWidth = 2;
     ctx.stroke();
 
-    const photo = await personImage(o.name);
+    const photo = state.assets.get('p:' + compact(o.name)) || null;
 
     if (photo) {
       drawCover(ctx, photo, 75, y + 25, 220, h - 50, 18);
@@ -801,33 +819,62 @@ function showGames() {
   `).join('');
 }
 
+async function saveRemoteAsset(type, key, dataUrl) {
+  const endpoint = type === 'foto' ? '/api/foto' : '/api/escudo';
+  const body = type === 'foto'
+    ? { name: key, dataUrl }
+    : { team: key, dataUrl };
+
+  const r = await fetch(endpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+    body: JSON.stringify(body)
+  });
+
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data?.error || `Falha ao guardar ${type} (${r.status})`);
+  return data;
+}
+
+async function imageFileToDataUrl(file) {
+  return await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
 async function checkAssets(games) {
   await loadIdentity();
 
   const missing = [];
+  if (!state.assets.has('logo')) missing.push({ type: 'logo', key: 'logo' });
 
-  if (!state.assets.has('logo')) {
-    missing.push({ type: 'logo', key: 'logo' });
+  const people = [...new Map(
+    games.flatMap(g => g.officials.map(o => [compact(o.name), o.name]))
+  ).values()];
+
+  const photoResults = await Promise.all(
+    people.map(async name => [name, await personImage(name)])
+  );
+  for (const [name, img] of photoResults) {
+    if (!img) missing.push({ type: 'foto', key: name });
   }
 
+  // Never make a second slow online search here. Analyze() already warmed
+  // the shield cache. A missing shield is an actionable upload, not a fatal error.
   for (const g of games) {
-    if (!await shieldImage(g.home)) {
-      missing.push({ type: 'escudo', key: g.home });
-    }
-
-    if (!await shieldImage(g.away)) {
-      missing.push({ type: 'escudo', key: g.away });
-    }
-
-    for (const o of g.officials) {
-      if (!await personImage(o.name)) {
-        missing.push({ type: 'foto', key: o.name });
-      }
-    }
+    if (!state.assets.has('s:' + compact(g.home))) missing.push({ type: 'escudo', key: g.home });
+    if (!state.assets.has('s:' + compact(g.away))) missing.push({ type: 'escudo', key: g.away });
   }
 
-  if (missing.length) {
-    renderMissing(missing);
+  const unique = [...new Map(
+    missing.map(x => [x.type + ':' + compact(x.key), x])
+  ).values()];
+
+  if (unique.length) {
+    renderMissing(unique);
     return false;
   }
 
@@ -836,60 +883,78 @@ async function checkAssets(games) {
 }
 
 function renderMissing(items) {
-  const unique = [
-    ...new Map(
-      items.map(x => [x.type + ':' + compact(x.key), x])
-    ).values()
-  ];
+  const unique = [...new Map(
+    items.map(x => [x.type + ':' + compact(x.key), x])
+  ).values()];
 
   $('missingAssets').hidden = false;
-
   $('missingAssets').innerHTML = `
     <div class="missingBox">
-      <h3>Faltam ficheiros antes de gerar</h3>
-      <p>O gerador bloqueia a criação para não sair uma publicação incompleta.</p>
+      <h3>Faltam ficheiros</h3>
+      <p>Carrega os que faltam. A aplicação usa-os imediatamente e tenta guardá-los automaticamente no GitHub.</p>
       ${unique.map(x => `
         <div class="missingRow">
-          <span>
-            <b>${
-              x.type === 'foto'
-                ? 'Fotografia'
-                : x.type === 'escudo'
-                  ? 'Escudo'
-                  : 'Logo'
-            }</b>: ${escapeHtml(x.key)}
-          </span>
-          <input
-            type="file"
-            accept="image/png,image/jpeg,image/webp"
-            data-key="${escapeHtml(x.type + '|' + x.key)}"
-          >
+          <span><b>${x.type === 'foto' ? 'Fotografia' : x.type === 'escudo' ? 'Escudo' : 'Logo'}</b>: ${escapeHtml(x.key)}</span>
+          ${x.type === 'logo' ? '' : `
+          <input type="file" accept="image/png,image/jpeg,image/webp" data-key="${escapeHtml(x.type + '|' + x.key)}">`}
         </div>
       `).join('')}
-      <button id="useMissing" class="secondary">
-        Usar ficheiros nesta sessão
-      </button>
+      ${unique.some(x => x.type !== 'logo') ? '<button id="useMissing" class="secondary">Guardar ficheiros e continuar</button>' : ''}
     </div>
   `;
 
-  $('useMissing').onclick = async () => {
+  const btn = $('useMissing');
+  if (!btn) return;
+
+  btn.onclick = async () => {
+    btn.disabled = true;
+    let saved = 0;
+    let failed = [];
+
     for (const input of $('missingAssets').querySelectorAll('input[type=file]')) {
       if (!input.files[0]) continue;
-
       const [type, key] = input.dataset.key.split('|');
-      const img = await fileToImage(input.files[0]);
 
-      state.assets.set(
-        type === 'foto'
-          ? 'p:' + compact(key)
-          : type === 'escudo'
-            ? 's:' + compact(key)
-            : 'logo',
-        img
-      );
+      try {
+        const dataUrl = await imageFileToDataUrl(input.files[0]);
+        const img = await fileToImage(input.files[0]);
+        const cacheKey = type === 'foto' ? 'p:' + compact(key) : 's:' + compact(key);
+        state.assets.set(cacheKey, img);
+
+        try {
+          await saveRemoteAsset(type, key, dataUrl);
+          saved++;
+        } catch (e) {
+          // The local/session image is still valid for this generation.
+          failed.push(`${key}: ${e.message}`);
+        }
+      } catch (e) {
+        failed.push(`${key}: ${e.message || e}`);
+      }
     }
 
-    setStatus('Ficheiros carregados. Podes gerar novamente.');
+    btn.disabled = false;
+
+    const remaining = [];
+    for (const g of state.games) {
+      for (const team of [g.home, g.away]) {
+        if (!state.assets.has('s:' + compact(team))) remaining.push({ type: 'escudo', key: team });
+      }
+      for (const o of g.officials) {
+        if (!state.assets.has('p:' + compact(o.name))) remaining.push({ type: 'foto', key: o.name });
+      }
+    }
+
+    const uniqRemaining = [...new Map(remaining.map(x => [x.type + ':' + compact(x.key), x])).values()];
+    if (!uniqRemaining.length) {
+      $('missingAssets').hidden = true;
+      setStatus(`Ficheiros carregados. ${saved ? saved + ' ficheiro(s) guardado(s) no GitHub. ' : ''}Podes gerar os JPG.`);
+      return;
+    }
+
+    renderMissing(uniqRemaining);
+    setStatus(saved ? `${saved} ficheiro(s) guardado(s). Ainda faltam ficheiros.` : 'Os ficheiros foram carregados nesta sessão, mas ainda falta algum recurso.');
+    if (failed.length) console.warn('Falhas ao guardar no GitHub:', failed);
   };
 }
 
@@ -897,153 +962,137 @@ function fileToImage(file) {
   return new Promise((resolve, reject) => {
     const u = URL.createObjectURL(file);
     const img = new Image();
-
-    img.onload = () => {
-      URL.revokeObjectURL(u);
-      resolve(img);
-    };
-
-    img.onerror = reject;
+    img.onload = () => { URL.revokeObjectURL(u); resolve(img); };
+    img.onerror = e => { URL.revokeObjectURL(u); reject(e); };
     img.src = u;
   });
 }
 
 async function analyze() {
   const file = $('pdfFile').files[0];
+  if (!file) return setError('Escolhe primeiro o PDF da FPF.');
 
-  if (!file) {
-    return setError('Escolhe primeiro o PDF da FPF.');
-  }
+  const names = $('names').value.split(/\r?\n/).map(x => x.trim()).filter(Boolean);
+  if (!names.length) return setError('Coloca pelo menos um nome na lista.');
 
-  const names = $('names').value
-    .split(/\r?\n/)
-    .map(x => x.trim())
-    .filter(Boolean);
-
-  if (!names.length) {
-    return setError('Coloca pelo menos um nome na lista.');
-  }
-
-  state.names = new Map(
-    names.map(n => [compact(n), n])
-  );
-
+  state.names = new Map(names.map(n => [compact(n), n]));
+  state.assets.clear();
   setStatus('A ler o PDF e a reconstruir as nomeações...');
 
   try {
     const data = await extractPDF(file);
-
     state.pages = data.pages;
     state.games = parsePages(data.pages);
 
     if (!state.games.length) {
-      return setError(
-        `PDF lido (${data.numPages} páginas), mas não foi encontrado nenhum jogo com os nomes indicados.`
-      );
+      return setError(`PDF lido (${data.numPages} páginas), mas não foi encontrado nenhum jogo com os nomes indicados.`);
     }
 
     showGames();
+    await loadIdentity();
+
+    // Photos are local and fast. Prepare them in parallel before generation.
+    const people = [...new Map(
+      state.games.flatMap(g => g.officials.map(o => [compact(o.name), o.name]))
+    ).values()];
+    await Promise.all(people.map(name => personImage(name)));
+
+    const warmup = prefetchShields(state.games);
+    const limit = new Promise(resolve => setTimeout(() => resolve({timeout: true}), 12000));
+    const result = await Promise.race([warmup, limit]);
 
     $('generateBtn').disabled = false;
 
-    setStatus(
-      `PDF lido: ${data.numPages} página(s). Encontrados ${state.games.length} jogo(s).`
-    );
+    if (result?.timeout) {
+      setStatus(`Pronto em menos de 30 s. A pesquisa de escudos demorou mais de 12 s; não vou bloquear a aplicação. Os escudos ainda podem continuar a chegar em segundo plano.`);
+    } else {
+      setStatus(`Pronto: ${state.games.length} jogo(s), ${result.found}/${result.total} escudos preparados em ${result.seconds.toFixed(1)} s. A geração dos JPG não faz pesquisas.`);
+    }
   } catch (e) {
     console.error(e);
-    setError(
-      'Erro ao ler o PDF: ' + (e?.message || e)
-    );
+    setError('Erro ao ler o PDF: ' + (e?.message || e));
   }
 }
 
 async function generateAll() {
   if (!state.games.length) return;
 
+  const started = performance.now();
   const ok = await checkAssets(state.games);
   if (!ok) return;
 
-  setStatus('A gerar os JPG...');
-
+  setStatus('A gerar os JPG — sem pesquisas externas...');
   const zip = new JSZip();
+  const batchSize = 4;
 
-  for (const g of state.games) {
-    const canvas = await render(g);
+  for (let i = 0; i < state.games.length; i += batchSize) {
+    const batch = state.games.slice(i, i + batchSize);
+    const blobs = await Promise.all(batch.map(async (g, j) => {
+      const canvas = render(g);
+      const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', .92));
+      return { g, blob };
+    }));
 
-    const blob = await new Promise(
-      r => canvas.toBlob(r, 'image/jpeg', .96)
-    );
+    for (const { g, blob } of blobs) {
+      zip.file(
+        safeFile(`${String(state.games.indexOf(g) + 1).padStart(2, '0')} - ${g.home} - ${g.away}.jpg`).slice(0, 150),
+        blob,
+        { compression: 'STORE' }
+      );
+    }
 
-    zip.file(
-      safeFile(`${g.home} - ${g.away}.jpg`).slice(0, 150),
-      blob
-    );
+    const elapsed = (performance.now() - started) / 1000;
+    setStatus(`A gerar JPG ${Math.min(i + batchSize, state.games.length)}/${state.games.length}... ${elapsed.toFixed(1)} s`);
+    if (elapsed > 30) {
+      setError('A geração ultrapassou 30 segundos. A causa provável é a codificação do JPEG/ZIP no navegador, não a pesquisa dos escudos.');
+      return;
+    }
   }
 
-  const blob = await zip.generateAsync({ type: 'blob' });
-
-  download(
-    blob,
-    'Nomeacoes_Marques_Bom.zip'
-  );
-
-  setStatus(
-    `Concluído: ${state.games.length} JPG(s) gerados.`
-  );
+  const out = await zip.generateAsync({ type: 'blob', compression: 'STORE' });
+  const elapsed = (performance.now() - started) / 1000;
+  if (elapsed > 30) {
+    setError(`A geração terminou em ${elapsed.toFixed(1)} s. A demora ocorreu na criação do ZIP, porque os JPG já estavam gerados.`);
+  }
+  download(out, 'Nomeacoes_Marques_Bom.zip');
+  setStatus(`Concluído: ${state.games.length} JPG(s) gerados em ${elapsed.toFixed(1)} s.`);
 }
 
 async function generateManual() {
   const home = $('mHome').value.trim();
   const away = $('mAway').value.trim();
   const competition = $('mCompetition').value.trim();
+  if (!home || !away || !competition) return setError('Preenche competição e as duas equipas.');
 
-  if (!home || !away || !competition) {
-    return setError(
-      'Preenche competição e as duas equipas.'
-    );
-  }
-
-  const officials = [
-    ...document.querySelectorAll('.manualOfficial')
-  ]
+  const officials = [...document.querySelectorAll('.manualOfficial')]
     .map(r => ({
       name: r.querySelector('.mName').value.trim(),
       role: r.querySelector('.mRole').value.trim() || 'Árbitro'
     }))
     .filter(x => x.name);
+  if (!officials.length) return setError('Adiciona pelo menos um oficial.');
 
-  if (!officials.length) {
-    return setError(
-      'Adiciona pelo menos um oficial.'
-    );
-  }
-
-  const g = {
-    home,
-    away,
-    competition,
-    officials
-  };
-
-  if ($('mDate').value.trim()) {
-    g.date = $('mDate').value.trim();
-  }
+  const g = { home, away, competition, officials, date: $('mDate').value.trim() };
+  await loadIdentity();
+  await Promise.all(officials.map(o => personImage(o.name)));
+  await Promise.race([
+    prefetchShields([g]),
+    new Promise(resolve => setTimeout(resolve, 12000))
+  ]);
 
   const ok = await checkAssets([g]);
   if (!ok) return;
 
-  const canvas = await render(g);
-
-  const blob = await new Promise(
-    r => canvas.toBlob(r, 'image/jpeg', .96)
-  );
-
-  download(
-    blob,
-    safeFile(`${home} - ${away}.jpg`)
-  );
-
-  setStatus('Nomeação manual gerada.');
+  const started = performance.now();
+  const canvas = render(g);
+  const blob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', .92));
+  const elapsed = (performance.now() - started) / 1000;
+  if (elapsed > 30) {
+    setError(`A nomeação manual demorou ${elapsed.toFixed(1)} s na codificação do JPG.`);
+    return;
+  }
+  download(blob, safeFile(`${home} - ${away}.jpg`));
+  setStatus(`Nomeação manual gerada em ${elapsed.toFixed(1)} s.`);
 }
 
 function download(blob, name) {
