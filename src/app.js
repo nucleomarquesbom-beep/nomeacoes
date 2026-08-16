@@ -545,13 +545,33 @@ async function shieldImage(team) {
     const f = safeFile(v);
 
     for (const ext of ['png', 'jpg', 'jpeg', 'webp']) {
-      const img = await tryImage(`/escudos/${f}.${ext}?v=2`);
+      const img = await tryImage(`/escudos/${f}.${ext}?v=4`);
 
       if (img) {
         state.assets.set(key, img);
         return img;
       }
     }
+  }
+
+  // Fallback online: only after checking the local /public/escudos folder.
+  // The API searches several independent sources in parallel.
+  try {
+    const r = await fetch(`/api/escudo?team=${encodeURIComponent(team)}`, {
+      headers: { 'Accept': 'application/json' }
+    });
+    if (r.ok) {
+      const data = await r.json();
+      if (data?.imageDataUrl) {
+        const img = await tryImage(data.imageDataUrl);
+        if (img) {
+          state.assets.set(key, img);
+          return img;
+        }
+      }
+    }
+  } catch (e) {
+    console.warn('Pesquisa online do escudo falhou:', team, e);
   }
 
   return null;
