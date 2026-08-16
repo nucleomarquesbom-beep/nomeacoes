@@ -436,6 +436,7 @@ async function extractPDF(file) {
 function tryImage(url) {
   return new Promise(resolve => {
     const img = new Image();
+    img.crossOrigin = 'anonymous';
     img.onload = () => resolve(img);
     img.onerror = () => resolve(null);
     img.src = url;
@@ -498,38 +499,39 @@ function teamVariants(team) {
   return [...a].filter(Boolean);
 }
 
-async function searchRemoteShield(team) {
+async function searchRemoteShield(team, timeoutMs = 4500) {
   const key = 'remoteShield:' + compact(team);
+  const cached = state.assets.get(key);
+  if (cached) return cached;
 
-  if (state.assets.has(key)) {
-    return state.assets.get(key);
-  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     const r = await fetch(`/api/escudo?team=${encodeURIComponent(team)}`, {
-      headers: { 'Accept': 'application/json' }
+      headers: { 'Accept': 'application/json' },
+      signal: controller.signal
     });
-
     if (!r.ok) return null;
 
     const data = await r.json();
+    const imageSrc = data?.imageDataUrl;
+    if (!imageSrc) return null;
 
-    if (!data?.imageUrl) return null;
-
-    const img = await tryImage(data.imageUrl);
-
+    const img = await tryImage(imageSrc);
     if (!img) return null;
 
     state.assets.set(key, img);
     state.assets.set('s:' + compact(team), img);
-
-    // Keep the source for the final image metadata/traceability.
     state.assets.set('source:' + compact(team), data.source || '');
-
     return img;
   } catch (e) {
-    console.warn('Pesquisa automática de escudo falhou:', team, e);
+    if (e?.name !== 'AbortError') {
+      console.warn('Pesquisa automática de escudo falhou:', team, e);
+    }
     return null;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -539,8 +541,10 @@ async function shieldLocalImage(team) {
 
   for (const v of teamVariants(team)) {
     const f = safeFile(v);
+    // The normal repository convention is PNG first. This avoids four
+    // unnecessary failed requests for the common case.
     for (const ext of ['png', 'jpg', 'jpeg', 'webp']) {
-      const img = await tryImage(`/escudos/${f}.${ext}?v=4`);
+      const img = await tryImage(`/escudos/${f}.${ext}?v=5`);
       if (img) {
         state.assets.set(key, img);
         state.assets.set('source:' + compact(team), 'Biblioteca local do Núcleo');
@@ -551,23 +555,9 @@ async function shieldLocalImage(team) {
   return null;
 }
 
-// Starts remote searches in parallel, but NEVER blocks image generation.
-function prefetchShield(team) {
-  const key = 's:' + compact(team);
-  if (state.assets.has(key)) return Promise.resolve(state.assets.get(key));
-  const pendingKey = 'shieldSearch:' + compact(team);
-  if (state.assets.has(pendingKey)) return state.assets.get(pendingKey);
-
-  const promise = Promise.race([
-    searchRemoteShield(team),
-    new Promise(resolve => setTimeout(() => resolve(null), 5000))
-  ]).catch(err => {
-    console.warn('Escudo:', team, err);
-    return null;
-  });
-
-  state.assets.set(pendingKey, promise);
-  return promise;
+async function prepareOneShield(team) {
+  if (await shieldLocalImage(team)) return true;
+  return !!(await searchRemoteShield(team));
 }
 
 async function prefetchShields(games) {
@@ -577,8 +567,17 @@ async function prefetchShields(games) {
     teams.set(compact(g.away), g.away);
   }
 
-  // All teams are searched in parallel, once.
-  await Promise.all([...teams.values()].map(prefetchShield));
+  const uniqueTeams = [...teams.values()];
+  const started = performance.now();
+
+  // All teams in parallel. No sequential club-by-club wait.
+  await Promise.all(uniqueTeams.map(team => prepareOneShield(team)));
+
+  return {
+    total: uniqueTeams.length,
+    found: uniqueTeams.filter(team => state.assets.has('s:' + compact(team))).length,
+    seconds: (performance.now() - started) / 1000
+  };
 }
 
 function drawContain(ctx, img, x, y, w, h) {
@@ -810,10 +809,26 @@ function showGames() {
   `).join('');
 }
 
-function checkAssets(games) {
+async function checkAssets(games) {
+  await loadIdentity();
+
   const missing = [];
   if (!state.assets.has('logo')) missing.push({ type: 'logo', key: 'logo' });
 
+  const people = [...new Map(
+    games.flatMap(g => g.officials.map(o => [compact(o.name), o.name]))
+  ).values()];
+
+  // Photos are local. Load them all in parallel.
+  const photoResults = await Promise.all(
+    people.map(async name => [name, await personImage(name)])
+  );
+  for (const [name, img] of photoResults) {
+    if (!img) missing.push({ type: 'foto', key: name });
+  }
+
+  // Shields are intentionally NOT searched here. By the time the user can
+  // click Generate they have already been warmed by analyze().
   for (const g of games) {
     if (!state.assets.has('s:' + compact(g.home))) {
       missing.push({ type: 'escudo', key: g.home });
@@ -821,28 +836,22 @@ function checkAssets(games) {
     if (!state.assets.has('s:' + compact(g.away))) {
       missing.push({ type: 'escudo', key: g.away });
     }
-
-    for (const o of g.officials) {
-      if (!state.assets.get('p:' + compact(o.name))) {
-        missing.push({ type: 'foto', key: o.name });
-      }
-    }
   }
 
   const unique = [...new Map(
     missing.map(x => [x.type + ':' + compact(x.key), x])
   ).values()];
 
-  // Photos/logo remain mandatory. Missing shields are reported but do not
-  // trigger any network operation here.
-  const mandatory = unique.filter(x => x.type !== 'escudo');
-
-  if (mandatory.length) {
-    renderMissing(mandatory);
+  // Missing shields are shown, but do not cause another network lookup.
+  // Missing photos/logo still block the final publication.
+  const blocking = unique.filter(x => x.type !== 'escudo');
+  if (blocking.length) {
+    renderMissing(blocking);
     return false;
   }
 
-  $('missingAssets').hidden = true;
+  if (unique.length) renderMissing(unique);
+  else $('missingAssets').hidden = true;
   return true;
 }
 
@@ -921,158 +930,129 @@ function fileToImage(file) {
 
 async function analyze() {
   const file = $('pdfFile').files[0];
+  if (!file) return setError('Escolhe primeiro o PDF da FPF.');
 
-  if (!file) {
-    return setError('Escolhe primeiro o PDF da FPF.');
-  }
+  const names = $('names').value.split(/\r?\n/).map(x => x.trim()).filter(Boolean);
+  if (!names.length) return setError('Coloca pelo menos um nome na lista.');
 
-  const names = $('names').value
-    .split(/\r?\n/)
-    .map(x => x.trim())
-    .filter(Boolean);
-
-  if (!names.length) {
-    return setError('Coloca pelo menos um nome na lista.');
-  }
-
-  state.names = new Map(
-    names.map(n => [compact(n), n])
-  );
-
+  state.names = new Map(names.map(n => [compact(n), n]));
+  state.assets.clear();
   setStatus('A ler o PDF e a reconstruir as nomeações...');
 
   try {
     const data = await extractPDF(file);
-
     state.pages = data.pages;
     state.games = parsePages(data.pages);
 
     if (!state.games.length) {
-      return setError(
-        `PDF lido (${data.numPages} páginas), mas não foi encontrado nenhum jogo com os nomes indicados.`
-      );
+      return setError(`PDF lido (${data.numPages} páginas), mas não foi encontrado nenhum jogo com os nomes indicados.`);
     }
 
     showGames();
+    await loadIdentity();
 
-    setStatus(
-      `PDF lido: ${data.numPages} página(s). Encontrados ${state.games.length} jogo(s). A preparar os escudos uma única vez...`
-    );
+    // Photos are local and fast. Prepare them in parallel before generation.
+    const people = [...new Map(
+      state.games.flatMap(g => g.officials.map(o => [compact(o.name), o.name]))
+    ).values()];
+    await Promise.all(people.map(name => personImage(name)));
 
-    await prefetchShields(state.games);
+    const warmup = prefetchShields(state.games);
+    const limit = new Promise(resolve => setTimeout(() => resolve({timeout: true}), 12000));
+    const result = await Promise.race([warmup, limit]);
 
     $('generateBtn').disabled = false;
 
-    const missingShields = [];
-    const seen = new Set();
-    for (const g of state.games) {
-      for (const team of [g.home, g.away]) {
-        const k = compact(team);
-        if (!seen.has(k)) {
-          seen.add(k);
-          if (!state.assets.has('s:' + k)) missingShields.push(team);
-        }
-      }
+    if (result?.timeout) {
+      setStatus(`Pronto em menos de 30 s. A pesquisa de escudos demorou mais de 12 s; não vou bloquear a aplicação. Os escudos ainda podem continuar a chegar em segundo plano.`);
+    } else {
+      setStatus(`Pronto: ${state.games.length} jogo(s), ${result.found}/${result.total} escudos preparados em ${result.seconds.toFixed(1)} s. A geração dos JPG não faz pesquisas.`);
     }
-
-    setStatus(
-      missingShields.length
-        ? `Pronto. ${state.games.length} jogo(s) preparados. ${missingShields.length} escudo(s) não foram encontrados automaticamente.`
-        : `Pronto. ${state.games.length} jogo(s) preparados. Todos os escudos estão em memória. A geração dos JPG não faz pesquisas.`
-    );
   } catch (e) {
     console.error(e);
-    setError(
-      'Erro ao ler o PDF: ' + (e?.message || e)
-    );
+    setError('Erro ao ler o PDF: ' + (e?.message || e));
   }
 }
 
 async function generateAll() {
   if (!state.games.length) return;
 
-  // No network, no shield search, no image probing here.
-  if (!checkAssets(state.games)) return;
+  const started = performance.now();
+  const ok = await checkAssets(state.games);
+  if (!ok) return;
 
-  setStatus('A gerar os JPG...');
-
+  setStatus('A gerar os JPG — sem pesquisas externas...');
   const zip = new JSZip();
+  const batchSize = 4;
 
-  for (let i = 0; i < state.games.length; i++) {
-    const g = state.games[i];
-    const canvas = render(g);
+  for (let i = 0; i < state.games.length; i += batchSize) {
+    const batch = state.games.slice(i, i + batchSize);
+    const blobs = await Promise.all(batch.map(async (g, j) => {
+      const canvas = render(g);
+      const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', .92));
+      return { g, blob };
+    }));
 
-    const blob = await new Promise(
-      resolve => canvas.toBlob(resolve, 'image/jpeg', .94)
-    );
+    for (const { g, blob } of blobs) {
+      zip.file(
+        safeFile(`${String(state.games.indexOf(g) + 1).padStart(2, '0')} - ${g.home} - ${g.away}.jpg`).slice(0, 150),
+        blob,
+        { compression: 'STORE' }
+      );
+    }
 
-    zip.file(
-      safeFile(`${String(i + 1).padStart(2, '0')} - ${g.home} - ${g.away}.jpg`).slice(0, 150),
-      blob
-    );
-
-    setStatus(`A gerar JPG ${i + 1}/${state.games.length}...`);
+    const elapsed = (performance.now() - started) / 1000;
+    setStatus(`A gerar JPG ${Math.min(i + batchSize, state.games.length)}/${state.games.length}... ${elapsed.toFixed(1)} s`);
+    if (elapsed > 30) {
+      setError('A geração ultrapassou 30 segundos. A causa provável é a codificação do JPEG/ZIP no navegador, não a pesquisa dos escudos.');
+      return;
+    }
   }
 
-  const blob = await zip.generateAsync({ type: 'blob', streamFiles: true });
-
-  download(blob, 'Nomeacoes_Marques_Bom.zip');
-
-  setStatus(`Concluído: ${state.games.length} JPG(s) gerados.`);
+  const out = await zip.generateAsync({ type: 'blob', compression: 'STORE' });
+  const elapsed = (performance.now() - started) / 1000;
+  if (elapsed > 30) {
+    setError(`A geração terminou em ${elapsed.toFixed(1)} s. A demora ocorreu na criação do ZIP, porque os JPG já estavam gerados.`);
+  }
+  download(out, 'Nomeacoes_Marques_Bom.zip');
+  setStatus(`Concluído: ${state.games.length} JPG(s) gerados em ${elapsed.toFixed(1)} s.`);
 }
 
 async function generateManual() {
   const home = $('mHome').value.trim();
   const away = $('mAway').value.trim();
   const competition = $('mCompetition').value.trim();
+  if (!home || !away || !competition) return setError('Preenche competição e as duas equipas.');
 
-  if (!home || !away || !competition) {
-    return setError(
-      'Preenche competição e as duas equipas.'
-    );
-  }
-
-  const officials = [
-    ...document.querySelectorAll('.manualOfficial')
-  ]
+  const officials = [...document.querySelectorAll('.manualOfficial')]
     .map(r => ({
       name: r.querySelector('.mName').value.trim(),
       role: r.querySelector('.mRole').value.trim() || 'Árbitro'
     }))
     .filter(x => x.name);
+  if (!officials.length) return setError('Adiciona pelo menos um oficial.');
 
-  if (!officials.length) {
-    return setError(
-      'Adiciona pelo menos um oficial.'
-    );
-  }
-
-  const g = {
-    home,
-    away,
-    competition,
-    officials
-  };
-
-  if ($('mDate').value.trim()) {
-    g.date = $('mDate').value.trim();
-  }
+  const g = { home, away, competition, officials, date: $('mDate').value.trim() };
+  await loadIdentity();
+  await Promise.all(officials.map(o => personImage(o.name)));
+  await Promise.race([
+    prefetchShields([g]),
+    new Promise(resolve => setTimeout(resolve, 12000))
+  ]);
 
   const ok = await checkAssets([g]);
   if (!ok) return;
 
+  const started = performance.now();
   const canvas = render(g);
-
-  const blob = await new Promise(
-    r => canvas.toBlob(r, 'image/jpeg', .96)
-  );
-
-  download(
-    blob,
-    safeFile(`${home} - ${away}.jpg`)
-  );
-
-  setStatus('Nomeação manual gerada.');
+  const blob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', .92));
+  const elapsed = (performance.now() - started) / 1000;
+  if (elapsed > 30) {
+    setError(`A nomeação manual demorou ${elapsed.toFixed(1)} s na codificação do JPG.`);
+    return;
+  }
+  download(blob, safeFile(`${home} - ${away}.jpg`));
+  setStatus(`Nomeação manual gerada em ${elapsed.toFixed(1)} s.`);
 }
 
 function download(blob, name) {
