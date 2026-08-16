@@ -248,52 +248,6 @@ function parsePage(page) {
   let current = null;
   let table = false;
 
-  // The FPF PDF is a real table. The columns are fixed:
-  //   Jogo        -> x ~ 16
-  //   Árbitro      -> x ~ 300
-  //   Associação   -> x ~ 470
-  // The old parser flattened the complete line and therefore read:
-  //   ATLÉTICO CP SAD GONCALO ROSA
-  // as the away team. We now use the PDF column coordinates to split
-  // the line BEFORE searching for names.
-  let officialX = 280;
-  let associationX = 455;
-
-  function updateColumns(line) {
-    if (!line?.items?.length) return;
-
-    for (const item of line.items) {
-      const n = normalizeText(item.text);
-      if (n === 'arbitro' || n === 'arbitra') {
-        officialX = item.x;
-      }
-      if (n === 'associacao') {
-        associationX = item.x;
-      }
-    }
-  }
-
-  function splitTableLine(line) {
-    const items = (line?.items || []).slice().sort((a, b) => a.x - b.x);
-    if (!items.length) return { game: '', official: '', association: '' };
-
-    // Give the table a little tolerance, but keep a clear separation.
-    const officialStart = officialX - 25;
-    const associationStart = associationX - 20;
-
-    const gameItems = items.filter(i => i.x < officialStart);
-    const officialItems = items.filter(i => i.x >= officialStart && i.x < associationStart);
-    const associationItems = items.filter(i => i.x >= associationStart);
-
-    const join = arr => arr.map(i => i.text).join(' ').replace(/\s+/g, ' ').trim();
-
-    return {
-      game: join(gameItems),
-      official: join(officialItems),
-      association: join(associationItems)
-    };
-  }
-
   function pushCurrent() {
     const game = finalizeGame(current);
     if (game) games.push(game);
@@ -301,11 +255,8 @@ function parsePage(page) {
   }
 
   for (let i = 0; i < page.lines.length; i++) {
-    const line = page.lines[i];
-    const text = line.text.trim();
+    const text = page.lines[i].text.trim();
     if (!text) continue;
-
-    updateColumns(line);
 
     if (isHeader(text)) {
       pushCurrent();
@@ -340,20 +291,44 @@ function parsePage(page) {
     }
 
     if (isVAR(text)) continue;
+
     if (!hasAssociation(text)) continue;
 
-    const columns = splitTableLine(line);
+    const withoutAssociation = removeAssociation(text);
+    const listed = findListedInText(withoutAssociation);
 
-    // -------------------------------------------------------------
-    // CASE 1: a game row.
-    // The team names are ALWAYS taken from the Jogo column only.
-    // Therefore:
-    //   LUSITANO ... - ATLÉTICO CP SAD | GONCALO ROSA | A.F. COIMBRA
-    // becomes exactly those three fields, even when Gonçalo is not
-    // present in the user's list.
-    // -------------------------------------------------------------
+    /*
+     * Caso 1:
+     * A linha contém jogo + primeiro oficial.
+     *
+     * Exemplo:
+     * LUSITANO ... - ATLÉTICO ... GONCALO ROSA A.F. COIMBRA
+     */
     if (looksLikeGameLine(text)) {
-      const parts = splitGamePrefix(columns.game);
+      const prefix = listed
+        ? withoutAssociation.slice(
+            0,
+            withoutAssociation.toLowerCase().indexOf(
+              normalizeText(listed.name).toLowerCase()
+            )
+          )
+        : withoutAssociation;
+
+      let parts = splitGamePrefix(prefix);
+
+      /*
+       * Se a procura direta não funcionar por causa de acentos,
+       * tentamos retirar o último nome reconhecido da linha.
+       */
+      if (!parts && listed) {
+        const normalizedLine = normalizeText(withoutAssociation);
+        const normalizedName = normalizeText(listed.name);
+        const p = normalizedLine.indexOf(normalizedName);
+
+        if (p >= 0) {
+          parts = splitGamePrefix(withoutAssociation.slice(0, p));
+        }
+      }
 
       if (parts) {
         pushCurrent();
@@ -367,11 +342,12 @@ function parsePage(page) {
           page: page.page
         };
 
-        const listed = findListedName(columns.official);
-
-        // Position 0 is the first official even if he is not in the list.
+        /*
+         * Mesmo que o primeiro oficial não esteja na lista,
+         * guardamos a posição.
+         */
         current.officials.push({
-          name: listed || null,
+          name: listed ? listed.name : null,
           position: 0
         });
 
@@ -379,13 +355,15 @@ function parsePage(page) {
       }
     }
 
-    // -------------------------------------------------------------
-    // CASE 2: continuation official row.
-    // The official column is read directly from its PDF column, so
-    // the association can never become part of the official name.
-    // -------------------------------------------------------------
+    /*
+     * Caso 2:
+     * Linha apenas com um oficial:
+     *
+     * NUNO GUERRA A.F. COIMBRA
+     */
     if (looksLikeOfficialLine(text) && current) {
-      const listed = findListedName(columns.official || text);
+      const listed = findListedName(withoutAssociation);
+
       const position = current.officials.length;
 
       current.officials.push({
@@ -400,6 +378,7 @@ function parsePage(page) {
   pushCurrent();
   return games;
 }
+
 function parsePages(pages) {
   return pages.flatMap(parsePage);
 }
@@ -492,7 +471,6 @@ async function loadIdentity() {
   ]);
 
   await loadFirst('background', [
-    '/assets/fundo_marques_bom.jpg',
     '/assets/fundo_nomeacao.png'
   ]);
 }
@@ -519,19 +497,10 @@ async function personImage(name) {
 }
 
 function teamVariants(team) {
-  const original = String(team || '').trim();
-
-  // Na pesquisa do escudo, remover apenas sufixos que aparecem no FIM
-  // do nome da equipa. Não remover FC, SC, CP, C., etc.
-  const withoutLegalSuffix = original
-    .replace(/(?:\s*[/,-]?\s*)(?:SAD|SDUQ|OAF)\s*$/i, '')
-    .trim();
-
   const a = new Set([
-    original,
-    withoutLegalSuffix,
-    original.replace(/[,.]/g, '').trim(),
-    withoutLegalSuffix.replace(/[,.]/g, '').trim()
+    team.trim(),
+    team.replace(/\bSAD\b/ig, '').replace(/\bSDUQ\b/ig, '').trim(),
+    team.replace(/[,.]/g, '').trim()
   ]);
 
   return [...a].filter(Boolean);
@@ -548,33 +517,13 @@ async function shieldImage(team) {
     const f = safeFile(v);
 
     for (const ext of ['png', 'jpg', 'jpeg', 'webp']) {
-      const img = await tryImage(`/escudos/${f}.${ext}?v=4`);
+      const img = await tryImage(`/escudos/${f}.${ext}?v=2`);
 
       if (img) {
         state.assets.set(key, img);
         return img;
       }
     }
-  }
-
-  // Fallback online: only after checking the local /public/escudos folder.
-  // The API searches several independent sources in parallel.
-  try {
-    const r = await fetch(`/api/escudo?team=${encodeURIComponent(team)}`, {
-      headers: { 'Accept': 'application/json' }
-    });
-    if (r.ok) {
-      const data = await r.json();
-      if (data?.imageDataUrl) {
-        const img = await tryImage(data.imageDataUrl);
-        if (img) {
-          state.assets.set(key, img);
-          return img;
-        }
-      }
-    }
-  } catch (e) {
-    console.warn('Pesquisa online do escudo falhou:', team, e);
   }
 
   return null;
@@ -813,36 +762,25 @@ async function checkAssets(games) {
   await loadIdentity();
 
   const missing = [];
-  const crestFailures = [];
 
   if (!state.assets.has('logo')) {
     missing.push({ type: 'logo', key: 'logo' });
   }
 
   for (const g of games) {
-    const home = await shieldImage(g.home);
-    if (!home) crestFailures.push(g.home);
+    if (!await shieldImage(g.home)) {
+      missing.push({ type: 'escudo', key: g.home });
+    }
 
-    const away = await shieldImage(g.away);
-    if (!away) crestFailures.push(g.away);
+    if (!await shieldImage(g.away)) {
+      missing.push({ type: 'escudo', key: g.away });
+    }
 
     for (const o of g.officials) {
       if (!await personImage(o.name)) {
         missing.push({ type: 'foto', key: o.name });
       }
     }
-  }
-
-  // Escudos são sempre pesquisados automaticamente. Nunca pedir ao utilizador
-  // para carregar um escudo. Se uma pesquisa falhar, bloqueamos a geração com
-  // uma mensagem clara para que não seja criada uma publicação incompleta.
-  const uniqueCrests = [...new Set(crestFailures)];
-  if (uniqueCrests.length) {
-    renderMissing([
-      ...missing,
-      ...uniqueCrests.map(key => ({ type: 'escudo_online', key }))
-    ]);
-    return false;
   }
 
   if (missing.length) {
@@ -865,85 +803,51 @@ function renderMissing(items) {
 
   $('missingAssets').innerHTML = `
     <div class="missingBox">
-      <h3>Verificação de imagens</h3>
-      <p>Os escudos são procurados automaticamente online. As fotografias dos árbitros também são procuradas automaticamente.</p>
+      <h3>Faltam ficheiros antes de gerar</h3>
+      <p>O gerador bloqueia a criação para não sair uma publicação incompleta.</p>
       ${unique.map(x => `
         <div class="missingRow">
           <span>
-            <b>${x.type === 'foto' ? 'Fotografia' : x.type === 'escudo_online' ? 'Escudo' : 'Logo'}</b>:
-            ${escapeHtml(x.key)}
+            <b>${
+              x.type === 'foto'
+                ? 'Fotografia'
+                : x.type === 'escudo'
+                  ? 'Escudo'
+                  : 'Logo'
+            }</b>: ${escapeHtml(x.key)}
           </span>
-          ${x.type === 'foto'
-            ? `
-              <span class="photoUploadArea">
-                <input type="file" accept="image/png,image/jpeg,image/webp" data-key="${escapeHtml(x.key)}">
-                <button type="button" class="secondary uploadPhotoBtn" data-name="${escapeHtml(x.key)}">Guardar fotografia</button>
-              </span>`
-            : x.type === 'escudo_online'
-              ? '<span class="onlineSearch">Pesquisa automática online concluída sem resultado</span>'
-              : ''}
+          <input
+            type="file"
+            accept="image/png,image/jpeg,image/webp"
+            data-key="${escapeHtml(x.type + '|' + x.key)}"
+          >
         </div>
       `).join('')}
-      <p id="uploadPhotoStatus" class="uploadStatus"></p>
+      <button id="useMissing" class="secondary">
+        Usar ficheiros nesta sessão
+      </button>
     </div>
   `;
 
-  for (const button of $('missingAssets').querySelectorAll('.uploadPhotoBtn')) {
-    button.onclick = async () => {
-      const name = button.dataset.name || '';
-      const input = $('missingAssets').querySelector(`input[data-key="${CSS.escape(name)}"]`);
-      const file = input?.files?.[0];
-      if (!file) {
-        setError(`Escolhe primeiro a fotografia de ${name}.`);
-        return;
-      }
+  $('useMissing').onclick = async () => {
+    for (const input of $('missingAssets').querySelectorAll('input[type=file]')) {
+      if (!input.files[0]) continue;
 
-      const status = $('uploadPhotoStatus');
-      button.disabled = true;
-      if (status) status.textContent = `A guardar a fotografia de ${name} no GitHub...`;
+      const [type, key] = input.dataset.key.split('|');
+      const img = await fileToImage(input.files[0]);
 
-      try {
-        const dataUrl = await fileToDataUrl(file);
-        const r = await fetch('/api/foto', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-          body: JSON.stringify({
-            name,
-            dataUrl,
-            mime: file.type
-          })
-        });
+      state.assets.set(
+        type === 'foto'
+          ? 'p:' + compact(key)
+          : type === 'escudo'
+            ? 's:' + compact(key)
+            : 'logo',
+        img
+      );
+    }
 
-        const data = await r.json().catch(() => ({}));
-        if (!r.ok || !data.ok) {
-          throw new Error(data.error || 'Não foi possível guardar a fotografia no GitHub.');
-        }
-
-        const img = await tryImage(data.publicUrl + `?v=${Date.now()}`);
-        if (!img) throw new Error('A fotografia foi guardada, mas ainda não ficou disponível no site.');
-
-        state.assets.set('p:' + compact(name), img);
-        button.textContent = 'Guardada no GitHub ✓';
-        button.disabled = true;
-        input.disabled = true;
-        if (status) status.textContent = `Fotografia de ${name} guardada no GitHub. Podes continuar.`;
-        setStatus(`Fotografia de ${name} guardada no GitHub.`);
-
-        // Se já não faltarem fotografias, esconder a caixa e permitir gerar.
-        const remaining = [...state.games.flatMap(g => g.officials)]
-          .some(o => !state.assets.has('p:' + compact(o.name)));
-        if (!remaining) {
-          $('missingAssets').hidden = true;
-          setStatus('Todas as fotografias estão disponíveis. Podes gerar os JPG.');
-        }
-      } catch (e) {
-        console.error(e);
-        button.disabled = false;
-        if (status) status.textContent = '';
-        setError(e?.message || e);
-      }
-    };
-  }
+    setStatus('Ficheiros carregados. Podes gerar novamente.');
+  };
 }
 
 function fileToImage(file) {
@@ -958,15 +862,6 @@ function fileToImage(file) {
 
     img.onerror = reject;
     img.src = u;
-  });
-}
-
-function fileToDataUrl(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result || ''));
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
   });
 }
 
