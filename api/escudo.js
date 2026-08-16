@@ -275,6 +275,35 @@ async function fromWebSearch(team) {
   }
 }
 
+
+async function fromSportsDB(team) {
+  try {
+    const results = [];
+    for (const query of variants(team).slice(0, 4)) {
+      const url = `https://www.thesportsdb.com/api/v1/json/123/searchteams.php?t=${encodeURIComponent(query)}`;
+      const data = await fetchJson(url, 2200);
+      for (const t of (data?.teams || [])) {
+        const badge = t.strBadge || t.strLogo || t.strTeamBadge;
+        if (!badge) continue;
+        const score = scoreName(t.strTeam || '', team) +
+          (/Portugal/i.test(t.strCountry || '') ? 8 : 0) +
+          (/Soccer|Football/i.test(t.strSport || '') ? 4 : 0);
+        results.push({
+          url: badge,
+          name: t.strTeam || '',
+          source: `TheSportsDB — ${t.strTeam || ''}`,
+          score: Math.min(100, score)
+        });
+      }
+    }
+    results.sort((a,b)=>b.score-a.score);
+    return results.find(x => x.score >= 55) || null;
+  } catch (e) {
+    console.warn('TheSportsDB shield lookup failed:', team, e?.message || e);
+    return null;
+  }
+}
+
 async function fromWikidata(team) {
   try {
     const hitsMap = new Map();
@@ -521,6 +550,7 @@ async function resolveOnline(team) {
   // Independent sources run concurrently so a slow source does not make the
   // total lookup equal to the sum of all source times.
   const results = await Promise.allSettled([
+    fromSportsDB(team),
     fromWikidata(team),
     fromWikipedia(team),
     fromZeroZero(team),
@@ -563,7 +593,7 @@ export default async function handler(req, res) {
   try {
     const result = await Promise.race([
       resolveOnline(team),
-      new Promise(resolve => setTimeout(() => resolve(null), 8000))
+      new Promise(resolve => setTimeout(() => resolve(null), 9000))
     ]);
 
     if (!result) {
