@@ -7,6 +7,10 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
 const $ = id => document.getElementById(id);
 const state = { pages: [], games: [], names: new Map(), assets: new Map() };
 
+// Colunas reais do PDF FPF: Jogo | Árbitro | Associação.
+const PDF_GAME_MAX_X = 280;
+const PDF_OFFICIAL_MAX_X = 469;
+
 function normalizeText(v = '') {
   return String(v).toLowerCase()
     .normalize('NFD')
@@ -298,36 +302,39 @@ function parsePage(page) {
     const listed = findListedInText(withoutAssociation);
 
     /*
-     * Caso 1:
-     * A linha contém jogo + primeiro oficial.
+     * CASO 1 — linha com JOGO + primeiro oficial.
      *
-     * Exemplo:
-     * LUSITANO ... - ATLÉTICO ... GONCALO ROSA A.F. COIMBRA
+     * O PDF da FPF tem colunas reais:
+     *   Jogo      -> x < 280
+     *   Árbitro   -> x >= 280 e x < 469
+     *   Associação -> x >= 469
+     *
+     * Não tentamos descobrir onde acaba o clube pelo nome do árbitro.
+     * Isto evita transformar, por exemplo:
+     *
+     * LUSITANO ... - ATLÉTICO CP SAD GONCALO ROSA A.F. COIMBRA
+     *
+     * em "ATLÉTICO CP SAD GONCALO ROSA".
      */
     if (looksLikeGameLine(text)) {
-      const prefix = listed
-        ? withoutAssociation.slice(
-            0,
-            withoutAssociation.toLowerCase().indexOf(
-              normalizeText(listed.name).toLowerCase()
-            )
-          )
-        : withoutAssociation;
+      const gameItems = (page.lines[i].items || [])
+        .filter(it => it.x < PDF_GAME_MAX_X)
+        .sort((a, b) => a.x - b.x);
 
-      let parts = splitGamePrefix(prefix);
+      const officialItems = (page.lines[i].items || [])
+        .filter(it => it.x >= PDF_GAME_MAX_X && it.x < PDF_OFFICIAL_MAX_X)
+        .sort((a, b) => a.x - b.x);
 
-      /*
-       * Se a procura direta não funcionar por causa de acentos,
-       * tentamos retirar o último nome reconhecido da linha.
-       */
-      if (!parts && listed) {
-        const normalizedLine = normalizeText(withoutAssociation);
-        const normalizedName = normalizeText(listed.name);
-        const p = normalizedLine.indexOf(normalizedName);
+      let parts = null;
 
-        if (p >= 0) {
-          parts = splitGamePrefix(withoutAssociation.slice(0, p));
-        }
+      if (gameItems.length) {
+        const gameText = gameItems
+          .map(it => it.text)
+          .join(' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+
+        parts = splitGamePrefix(gameText);
       }
 
       if (parts) {
@@ -342,16 +349,60 @@ function parsePage(page) {
           page: page.page
         };
 
+        const firstOfficialText = officialItems
+          .map(it => it.text)
+          .join(' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+
+        const listedFirst = findListedName(firstOfficialText);
+
         /*
-         * Mesmo que o primeiro oficial não esteja na lista,
-         * guardamos a posição.
+         * Mesmo que o primeiro árbitro não esteja na lista,
+         * a posição 0 é preservada.
          */
         current.officials.push({
-          name: listed ? listed.name : null,
+          name: listedFirst || firstOfficialText || null,
           position: 0
         });
 
         continue;
+      }
+
+      /*
+       * Fallback para PDFs em que as coordenadas não estejam disponíveis.
+       * Aqui usamos o nome da lista, mas nunca incluímos o nome do árbitro
+       * na equipa se conseguirmos separar pelas colunas.
+       */
+      const listed = findListedInText(withoutAssociation);
+
+      if (listed) {
+        const normalizedLine = normalizeText(withoutAssociation);
+        const normalizedName = normalizeText(listed.name);
+        const p = normalizedLine.indexOf(normalizedName);
+
+        if (p >= 0) {
+          const before = withoutAssociation.slice(0, p);
+          const fallbackParts = splitGamePrefix(before);
+
+          if (fallbackParts) {
+            pushCurrent();
+
+            current = {
+              competition,
+              home: fallbackParts.home,
+              away: fallbackParts.away,
+              officials: [{
+                name: listed.name,
+                position: 0
+              }],
+              observer: null,
+              page: page.page
+            };
+
+            continue;
+          }
+        }
       }
     }
 
@@ -471,6 +522,7 @@ async function loadIdentity() {
   ]);
 
   await loadFirst('background', [
+    '/assets/fundo_marques_bom.jpg',
     '/assets/fundo_nomeacao.png'
   ]);
 }
