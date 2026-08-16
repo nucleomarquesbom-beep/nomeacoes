@@ -361,7 +361,7 @@ function parsePage(page) {
     // Continuation lines contain only the official + association columns.
     if (official && /^A\.?\s*F\.?/i.test(assoc) && current) {
       let listed = findListedName(official);
-      if (!listed) listed = findListedName(withoutAssociation);
+      if (!listed) listed = findListedName(removeAssociation(text));
       current.officials.push({
         name: listed || null,
         position: current.officials.length
