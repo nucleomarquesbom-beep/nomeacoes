@@ -520,8 +520,11 @@ async function personImage(name) {
 
 function teamVariants(team) {
   const original = String(team || '').trim();
+
+  // Na pesquisa do escudo, remover apenas sufixos que aparecem no FIM
+  // do nome da equipa. Não remover FC, SC, CP, C., etc.
   const withoutLegalSuffix = original
-    .replace(/(?:,?\s+)(?:SAD|SDUQ)\s*$/i, '')
+    .replace(/(?:\s*[/,-]?\s*)(?:SAD|SDUQ|OAF)\s*$/i, '')
     .trim();
 
   const a = new Set([
@@ -863,48 +866,84 @@ function renderMissing(items) {
   $('missingAssets').innerHTML = `
     <div class="missingBox">
       <h3>Verificação de imagens</h3>
-      <p>Os escudos são procurados automaticamente online. Não precisas de os carregar.</p>
+      <p>Os escudos são procurados automaticamente online. As fotografias dos árbitros também são procuradas automaticamente.</p>
       ${unique.map(x => `
         <div class="missingRow">
           <span>
-            <b>${
-              x.type === 'foto'
-                ? 'Fotografia'
-                : x.type === 'escudo'
-                  ? 'Escudo'
-                  : 'Logo'
-            }</b>: ${escapeHtml(x.key)}
+            <b>${x.type === 'foto' ? 'Fotografia' : x.type === 'escudo_online' ? 'Escudo' : 'Logo'}</b>:
+            ${escapeHtml(x.key)}
           </span>
-          ${x.type === 'escudo_online'
-            ? '<span class="onlineSearch">Pesquisa automática online concluída sem resultado</span>'
-            : `<input type="file" accept="image/png,image/jpeg,image/webp" data-key="${escapeHtml(x.type + '|' + x.key)}">` }
+          ${x.type === 'foto'
+            ? `
+              <span class="photoUploadArea">
+                <input type="file" accept="image/png,image/jpeg,image/webp" data-key="${escapeHtml(x.key)}">
+                <button type="button" class="secondary uploadPhotoBtn" data-name="${escapeHtml(x.key)}">Guardar fotografia</button>
+              </span>`
+            : x.type === 'escudo_online'
+              ? '<span class="onlineSearch">Pesquisa automática online concluída sem resultado</span>'
+              : ''}
         </div>
       `).join('')}
-      <button id="useMissing" class="secondary">
-        Usar ficheiros nesta sessão
-      </button>
+      <p id="uploadPhotoStatus" class="uploadStatus"></p>
     </div>
   `;
 
-  $('useMissing').onclick = async () => {
-    for (const input of $('missingAssets').querySelectorAll('input[type=file]')) {
-      if (!input.files[0]) continue;
+  for (const button of $('missingAssets').querySelectorAll('.uploadPhotoBtn')) {
+    button.onclick = async () => {
+      const name = button.dataset.name || '';
+      const input = $('missingAssets').querySelector(`input[data-key="${CSS.escape(name)}"]`);
+      const file = input?.files?.[0];
+      if (!file) {
+        setError(`Escolhe primeiro a fotografia de ${name}.`);
+        return;
+      }
 
-      const [type, key] = input.dataset.key.split('|');
-      const img = await fileToImage(input.files[0]);
+      const status = $('uploadPhotoStatus');
+      button.disabled = true;
+      if (status) status.textContent = `A guardar a fotografia de ${name} no GitHub...`;
 
-      state.assets.set(
-        type === 'foto'
-          ? 'p:' + compact(key)
-          : type === 'escudo'
-            ? 's:' + compact(key)
-            : 'logo',
-        img
-      );
-    }
+      try {
+        const dataUrl = await fileToDataUrl(file);
+        const r = await fetch('/api/foto', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+          body: JSON.stringify({
+            name,
+            dataUrl,
+            mime: file.type
+          })
+        });
 
-    setStatus('Ficheiros carregados. Podes gerar novamente.');
-  };
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok || !data.ok) {
+          throw new Error(data.error || 'Não foi possível guardar a fotografia no GitHub.');
+        }
+
+        const img = await tryImage(data.publicUrl + `?v=${Date.now()}`);
+        if (!img) throw new Error('A fotografia foi guardada, mas ainda não ficou disponível no site.');
+
+        state.assets.set('p:' + compact(name), img);
+        button.textContent = 'Guardada no GitHub ✓';
+        button.disabled = true;
+        input.disabled = true;
+        if (status) status.textContent = `Fotografia de ${name} guardada no GitHub. Podes continuar.`;
+        setStatus(`Fotografia de ${name} guardada no GitHub.`);
+
+        // Se já não faltarem fotografias, esconder a caixa e permitir gerar.
+        const remaining = [...state.games.flatMap(g => g.officials)]
+          .some(o => !state.assets.has('p:' + compact(o.name)));
+        if (!remaining) {
+          $('missingAssets').hidden = true;
+          setStatus('Todas as fotografias estão disponíveis. Podes gerar os JPG.');
+        }
+      } catch (e) {
+        console.error(e);
+        button.disabled = false;
+        if (status) status.textContent = '';
+        setError(e?.message || e);
+      }
+    };
+  }
 }
 
 function fileToImage(file) {
@@ -919,6 +958,15 @@ function fileToImage(file) {
 
     img.onerror = reject;
     img.src = u;
+  });
+}
+
+function fileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
   });
 }
 
