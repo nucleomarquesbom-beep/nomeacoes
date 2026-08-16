@@ -248,6 +248,52 @@ function parsePage(page) {
   let current = null;
   let table = false;
 
+  // The FPF PDF is a real table. The columns are fixed:
+  //   Jogo        -> x ~ 16
+  //   Árbitro      -> x ~ 300
+  //   Associação   -> x ~ 470
+  // The old parser flattened the complete line and therefore read:
+  //   ATLÉTICO CP SAD GONCALO ROSA
+  // as the away team. We now use the PDF column coordinates to split
+  // the line BEFORE searching for names.
+  let officialX = 280;
+  let associationX = 455;
+
+  function updateColumns(line) {
+    if (!line?.items?.length) return;
+
+    for (const item of line.items) {
+      const n = normalizeText(item.text);
+      if (n === 'arbitro' || n === 'arbitra') {
+        officialX = item.x;
+      }
+      if (n === 'associacao') {
+        associationX = item.x;
+      }
+    }
+  }
+
+  function splitTableLine(line) {
+    const items = (line?.items || []).slice().sort((a, b) => a.x - b.x);
+    if (!items.length) return { game: '', official: '', association: '' };
+
+    // Give the table a little tolerance, but keep a clear separation.
+    const officialStart = officialX - 25;
+    const associationStart = associationX - 20;
+
+    const gameItems = items.filter(i => i.x < officialStart);
+    const officialItems = items.filter(i => i.x >= officialStart && i.x < associationStart);
+    const associationItems = items.filter(i => i.x >= associationStart);
+
+    const join = arr => arr.map(i => i.text).join(' ').replace(/\s+/g, ' ').trim();
+
+    return {
+      game: join(gameItems),
+      official: join(officialItems),
+      association: join(associationItems)
+    };
+  }
+
   function pushCurrent() {
     const game = finalizeGame(current);
     if (game) games.push(game);
@@ -255,8 +301,11 @@ function parsePage(page) {
   }
 
   for (let i = 0; i < page.lines.length; i++) {
-    const text = page.lines[i].text.trim();
+    const line = page.lines[i];
+    const text = line.text.trim();
     if (!text) continue;
+
+    updateColumns(line);
 
     if (isHeader(text)) {
       pushCurrent();
@@ -291,44 +340,20 @@ function parsePage(page) {
     }
 
     if (isVAR(text)) continue;
-
     if (!hasAssociation(text)) continue;
 
-    const withoutAssociation = removeAssociation(text);
-    const listed = findListedInText(withoutAssociation);
+    const columns = splitTableLine(line);
 
-    /*
-     * Caso 1:
-     * A linha contém jogo + primeiro oficial.
-     *
-     * Exemplo:
-     * LUSITANO ... - ATLÉTICO ... GONCALO ROSA A.F. COIMBRA
-     */
+    // -------------------------------------------------------------
+    // CASE 1: a game row.
+    // The team names are ALWAYS taken from the Jogo column only.
+    // Therefore:
+    //   LUSITANO ... - ATLÉTICO CP SAD | GONCALO ROSA | A.F. COIMBRA
+    // becomes exactly those three fields, even when Gonçalo is not
+    // present in the user's list.
+    // -------------------------------------------------------------
     if (looksLikeGameLine(text)) {
-      const prefix = listed
-        ? withoutAssociation.slice(
-            0,
-            withoutAssociation.toLowerCase().indexOf(
-              normalizeText(listed.name).toLowerCase()
-            )
-          )
-        : withoutAssociation;
-
-      let parts = splitGamePrefix(prefix);
-
-      /*
-       * Se a procura direta não funcionar por causa de acentos,
-       * tentamos retirar o último nome reconhecido da linha.
-       */
-      if (!parts && listed) {
-        const normalizedLine = normalizeText(withoutAssociation);
-        const normalizedName = normalizeText(listed.name);
-        const p = normalizedLine.indexOf(normalizedName);
-
-        if (p >= 0) {
-          parts = splitGamePrefix(withoutAssociation.slice(0, p));
-        }
-      }
+      const parts = splitGamePrefix(columns.game);
 
       if (parts) {
         pushCurrent();
@@ -342,12 +367,11 @@ function parsePage(page) {
           page: page.page
         };
 
-        /*
-         * Mesmo que o primeiro oficial não esteja na lista,
-         * guardamos a posição.
-         */
+        const listed = findListedName(columns.official);
+
+        // Position 0 is the first official even if he is not in the list.
         current.officials.push({
-          name: listed ? listed.name : null,
+          name: listed || null,
           position: 0
         });
 
@@ -355,15 +379,13 @@ function parsePage(page) {
       }
     }
 
-    /*
-     * Caso 2:
-     * Linha apenas com um oficial:
-     *
-     * NUNO GUERRA A.F. COIMBRA
-     */
+    // -------------------------------------------------------------
+    // CASE 2: continuation official row.
+    // The official column is read directly from its PDF column, so
+    // the association can never become part of the official name.
+    // -------------------------------------------------------------
     if (looksLikeOfficialLine(text) && current) {
-      const listed = findListedName(withoutAssociation);
-
+      const listed = findListedName(columns.official || text);
       const position = current.officials.length;
 
       current.officials.push({
@@ -378,7 +400,6 @@ function parsePage(page) {
   pushCurrent();
   return games;
 }
-
 function parsePages(pages) {
   return pages.flatMap(parsePage);
 }
@@ -499,10 +520,6 @@ async function personImage(name) {
 
 function teamVariants(team) {
   const original = String(team || '').trim();
-
-  // IMPORTANT:
-  // SAD / SDUQ are removed ONLY when they are the final legal
-  // designation of the club name. We do not remove them elsewhere.
   const withoutLegalSuffix = original
     .replace(/(?:,?\s+)(?:SAD|SDUQ)\s*$/i, '')
     .trim();
