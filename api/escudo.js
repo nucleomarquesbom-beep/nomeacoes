@@ -144,6 +144,137 @@ function htmlTitle(html) {
   return m ? clean(m[1].replace(/<[^>]+>/g, '')) : '';
 }
 
+
+function decodeHtml(s) {
+  return String(s || '')
+    .replace(/&amp;/g, '&').replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+}
+
+function extractLinksFromSearchHtml(html) {
+  const out = [];
+  const seen = new Set();
+  const re = /<a[^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+  let m;
+  while ((m = re.exec(html || ''))) {
+    let href = decodeHtml(m[1]);
+    const title = clean(m[2].replace(/<[^>]+>/g, ' '));
+    if (!href || !title) continue;
+
+    // DuckDuckGo sometimes wraps links in /l/?uddg=...
+    try {
+      if (/^https?:\/\/duckduckgo\.com\/l\//i.test(href)) {
+        const u = new URL(href);
+        href = u.searchParams.get('uddg') || href;
+      }
+    } catch {}
+
+    if (!/^https?:\/\//i.test(href)) continue;
+    if (seen.has(href)) continue;
+    seen.add(href);
+    out.push({ href, title });
+    if (out.length >= 10) break;
+  }
+  return out;
+}
+
+function socialOrOfficialScore(url, title, team) {
+  const u = String(url || '').toLowerCase();
+  let score = scoreName(title, team);
+  if (/facebook\.com|instagram\.com/.test(u)) score += 8;
+  if (/zerozero\.pt/.test(u)) score += 7;
+  if (/fpf\.pt/.test(u)) score += 7;
+  if (/wikipedia\.org|wikimedia\.org|wikidata\.org/.test(u)) score += 5;
+  if (/\.pt\b/.test(u)) score += 2;
+  return Math.min(100, score);
+}
+
+async function searchDuckDuckGo(query) {
+  const q = encodeURIComponent(query);
+  const html = await fetchText(
+    `https://html.duckduckgo.com/html/?q=${q}`,
+    2500
+  );
+  return extractLinksFromSearchHtml(html || '');
+}
+
+function extractPageImage(html, baseUrl) {
+  if (!html) return null;
+
+  const patterns = [
+    /<meta[^>]+property=["']og:image(?::secure_url)?["'][^>]+content=["']([^"']+)["']/i,
+    /<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image(?::secure_url)?["']/i,
+    /<meta[^>]+name=["']twitter:image(?::src)?["'][^>]+content=["']([^"']+)["']/i,
+    /<meta[^>]+content=["']([^"']+)["'][^>]+name=["']twitter:image(?::src)?["']/i
+  ];
+
+  for (const rx of patterns) {
+    const m = html.match(rx);
+    const url = absoluteUrl(decodeHtml(m?.[1] || ''), baseUrl);
+    if (isImageUrl(url)) return url;
+  }
+
+  // Last resort: inspect a small number of image tags and prefer crest/logo/badge files.
+  const imgs = [...html.matchAll(/<img[^>]+(?:src|data-src)=["']([^"']+)["'][^>]*>/gi)]
+    .map(m => absoluteUrl(decodeHtml(m[1]), baseUrl))
+    .filter(isImageUrl);
+
+  return imgs.find(u => /logo|escudo|badge|crest|emblema|simbolo/i.test(u)) || null;
+}
+
+async function fromWebSearch(team) {
+  try {
+    const qs = [];
+    for (const v of variants(team).slice(0, 3)) {
+      qs.push(`"${v}" futebol escudo`);
+      qs.push(`"${v}" clube Portugal`);
+      qs.push(`site:facebook.com "${v}"`);
+      qs.push(`site:instagram.com "${v}"`);
+    }
+
+    const searchResults = await Promise.allSettled(qs.map(searchDuckDuckGo));
+    const links = [];
+    const seen = new Set();
+
+    for (const r of searchResults) {
+      if (r.status !== 'fulfilled') continue;
+      for (const x of r.value) {
+        if (seen.has(x.href)) continue;
+        seen.add(x.href);
+        links.push(x);
+      }
+    }
+
+    const likely = links
+      .filter(x => !/google\.|duckduckgo\.|bing\.com|youtube\.com/i.test(x.href))
+      .map(x => ({ ...x, score: socialOrOfficialScore(x.href, x.title, team) }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 12);
+
+    const pages = await Promise.allSettled(likely.map(async x => {
+      const html = await fetchText(x.href, 2200);
+      const image = extractPageImage(html, x.href);
+      if (!image) return null;
+      return {
+        url: image,
+        name: x.title,
+        source: `Pesquisa web — ${x.href}`,
+        score: Math.min(100, x.score + 3)
+      };
+    }));
+
+    const candidates = pages
+      .filter(r => r.status === 'fulfilled' && r.value?.url)
+      .map(r => r.value)
+      .sort((a, b) => b.score - a.score);
+
+    return candidates[0] || null;
+  } catch (e) {
+    console.warn('Web/social shield lookup failed:', team, e?.message || e);
+    return null;
+  }
+}
+
 async function fromWikidata(team) {
   try {
     const hitsMap = new Map();
@@ -393,7 +524,8 @@ async function resolveOnline(team) {
     fromWikidata(team),
     fromWikipedia(team),
     fromZeroZero(team),
-    fromCommons(team)
+    fromCommons(team),
+    fromWebSearch(team)
   ]);
 
   const candidates = results
@@ -431,7 +563,7 @@ export default async function handler(req, res) {
   try {
     const result = await Promise.race([
       resolveOnline(team),
-      new Promise(resolve => setTimeout(() => resolve(null), 7500))
+      new Promise(resolve => setTimeout(() => resolve(null), 8000))
     ]);
 
     if (!result) {
