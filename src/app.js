@@ -302,87 +302,65 @@ function parsePage(page) {
     const listed = findListedInText(withoutAssociation);
 
     /*
-     * CASO 1 — linha com JOGO + primeiro oficial.
-     *
-     * O PDF da FPF tem colunas reais:
-     *   Jogo      -> x < 280
-     *   Árbitro   -> x >= 280 e x < 469
-     *   Associação -> x >= 469
-     *
-     * Não tentamos descobrir onde acaba o clube pelo nome do árbitro.
-     * Isto evita transformar, por exemplo:
-     *
-     * LUSITANO ... - ATLÉTICO CP SAD GONCALO ROSA A.F. COIMBRA
-     *
-     * em "ATLÉTICO CP SAD GONCALO ROSA".
+     * CASO 1 — jogo + primeiro oficial.
+     * As coordenadas separam as colunas; a procura do árbitro é feita
+     * primeiro na coluna Árbitro e depois, como fallback, na linha.
      */
     if (looksLikeGameLine(text)) {
-      const gameItems = (page.lines[i].items || [])
+      const items = page.lines[i].items || [];
+
+      const gameItems = items
         .filter(it => it.x < PDF_GAME_MAX_X)
         .sort((a, b) => a.x - b.x);
 
-      const officialItems = (page.lines[i].items || [])
+      const officialItems = items
         .filter(it => it.x >= PDF_GAME_MAX_X && it.x < PDF_OFFICIAL_MAX_X)
         .sort((a, b) => a.x - b.x);
 
-      let parts = null;
+      const gameText = gameItems.map(it => it.text).join(' ')
+        .replace(/\s+/g, ' ').trim();
 
-      if (gameItems.length) {
-        const gameText = gameItems
-          .map(it => it.text)
-          .join(' ')
-          .replace(/\s+/g, ' ')
-          .trim();
+      const officialText = officialItems.map(it => it.text).join(' ')
+        .replace(/\s+/g, ' ').trim();
 
-        parts = splitGamePrefix(gameText);
-      }
+      const parts = splitGamePrefix(gameText);
 
       if (parts) {
         pushCurrent();
+
+        // Primeiro: apenas a coluna do árbitro.
+        let listedFirst = findListedName(officialText);
+
+        // Fallback: linha completa, mas sem associação.
+        if (!listedFirst) {
+          listedFirst = findListedName(removeAssociation(text));
+        }
 
         current = {
           competition,
           home: parts.home,
           away: parts.away,
-          officials: [],
+          officials: [{
+            name: listedFirst || null,
+            position: 0
+          }],
           observer: null,
           page: page.page
         };
 
-        const firstOfficialText = officialItems
-          .map(it => it.text)
-          .join(' ')
-          .replace(/\s+/g, ' ')
-          .trim();
-
-        const listedFirst = findListedName(firstOfficialText);
-
-        /*
-         * Mesmo que o primeiro árbitro não esteja na lista,
-         * a posição 0 é preservada.
-         */
-        current.officials.push({
-          name: listedFirst || firstOfficialText || null,
-          position: 0
-        });
-
         continue;
       }
 
-      /*
-       * Fallback para PDFs em que as coordenadas não estejam disponíveis.
-       * Aqui usamos o nome da lista, mas nunca incluímos o nome do árbitro
-       * na equipa se conseguirmos separar pelas colunas.
-       */
-      const listed = findListedInText(withoutAssociation);
+      // Fallback para PDFs com coordenadas diferentes.
+      const fallbackListed = findListedInText(removeAssociation(text));
 
-      if (listed) {
-        const normalizedLine = normalizeText(withoutAssociation);
-        const normalizedName = normalizeText(listed.name);
-        const p = normalizedLine.indexOf(normalizedName);
+      if (fallbackListed) {
+        const line = normalizeText(removeAssociation(text));
+        const name = normalizeText(fallbackListed.name);
+        const p = line.indexOf(name);
 
         if (p >= 0) {
-          const before = withoutAssociation.slice(0, p);
+          const before = removeAssociation(text).slice(0, p);
           const fallbackParts = splitGamePrefix(before);
 
           if (fallbackParts) {
@@ -393,7 +371,7 @@ function parsePage(page) {
               home: fallbackParts.home,
               away: fallbackParts.away,
               officials: [{
-                name: listed.name,
+                name: fallbackListed.name,
                 position: 0
               }],
               observer: null,
@@ -413,7 +391,20 @@ function parsePage(page) {
      * NUNO GUERRA A.F. COIMBRA
      */
     if (looksLikeOfficialLine(text) && current) {
-      const listed = findListedName(withoutAssociation);
+      const items = page.lines[i].items || [];
+
+      const officialItems = items
+        .filter(it => it.x >= PDF_GAME_MAX_X && it.x < PDF_OFFICIAL_MAX_X)
+        .sort((a, b) => a.x - b.x);
+
+      const officialText = officialItems.map(it => it.text).join(' ')
+        .replace(/\s+/g, ' ').trim();
+
+      let listed = findListedName(officialText);
+
+      if (!listed) {
+        listed = findListedName(withoutAssociation);
+      }
 
       const position = current.officials.length;
 
