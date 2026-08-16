@@ -8,30 +8,18 @@ function clean(s) {
 }
 
 function stripLegalSuffixes(s) {
-  return clean(s)
-    .replace(/\bS\.?A\.?D\.?\b/gi, ' ')
-    .replace(/\bS\.?D\.?U\.?Q\.?\b/gi, ' ')
-    .replace(/\bSociedade\s+Desportiva\b/gi, ' ')
-    .replace(/\bSociedade\s+An[oó]nima\s+Desportiva\b/gi, ' ')
-    .replace(/\bSAD\b/gi, ' ')
-    .replace(/\bSDUQ\b/gi, ' ');
+  const value = clean(s);
+
+  // IMPORTANT:
+  // Remove SAD/SDUQ only when they are the final legal suffix of the club.
+  // Do NOT remove SC, FC, CP, C., OAF, Futebol, Clube, etc.
+  return value
+    .replace(/\s+(?:S\.?\s*A\.?\s*D\.?|S\.?\s*D\.?\s*U\.?\s*Q\.?)$/i, '')
+    .trim();
 }
 
 function baseClubName(s) {
-  let x = stripLegalSuffixes(s);
-
-  // FPF/football PDFs often append legal/formal designations.
-  x = x.replace(/\s*\/\s*/g, ' ');
-  x = x.replace(/\bOAF\b/gi, ' ');
-  x = x.replace(/\bS\.?D\.?\b/gi, ' ');
-  x = x.replace(/\bS\.?C\.?\b/gi, ' ');
-  x = x.replace(/\bF\.?C\.?\b/gi, ' ');
-  x = x.replace(/\bC\.?P\.?\b/gi, ' CP ');
-  x = x.replace(/\bC\.?D\.?\b/gi, ' CD ');
-  x = x.replace(/\bC\.?\b(?=\s|$)/gi, ' ');
-
-  // Do not remove meaningful words such as "Sporting" or "Atlético".
-  return clean(x);
+  return stripLegalSuffixes(s);
 }
 
 function norm(s) {
@@ -39,7 +27,6 @@ function norm(s) {
     .toLowerCase()
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
-    .replace(/\b(sad|sduq|sociedade|desportiva|futebol|clube|sporting clube)\b/g, ' ')
     .replace(/[^a-z0-9]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
@@ -48,21 +35,17 @@ function norm(s) {
 function variants(team) {
   const original = clean(team);
   const base = baseClubName(original);
+  const values = [original];
 
-  const values = [
-    original,
-    base,
+  // Only add the shortened form when SAD/SDUQ is actually present at the end.
+  if (base !== original) values.push(base);
+
+  // Small spelling variants, without deleting club designations.
+  values.push(
     base.replace(/\bAtlético\b/gi, 'Atletico'),
-    base.replace(/\bSporting\b/gi, 'Sporting Clube'),
     base.replace(/\bAcadémica\b/gi, 'Academica'),
-    base.replace(/\bSão\b/gi, 'Sao'),
-    base.replace(/\bSC\b/gi, 'Sporting Clube'),
-    base.replace(/\bFC\b/gi, 'Futebol Clube')
-  ];
-
-  // Also search the compact core, useful for ZeroZero/Wikipedia.
-  const core = norm(base);
-  if (core) values.push(core);
+    base.replace(/\bSão\b/gi, 'Sao')
+  );
 
   return [...new Set(values.map(clean).filter(Boolean))];
 }
