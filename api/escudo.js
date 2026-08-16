@@ -7,15 +7,87 @@ function clean(s) {
   return String(s || '').replace(/\s+/g, ' ').trim();
 }
 
-function norm(s) {
+function stripLegalSuffixes(s) {
   return clean(s)
+    .replace(/\bS\.?A\.?D\.?\b/gi, ' ')
+    .replace(/\bS\.?D\.?U\.?Q\.?\b/gi, ' ')
+    .replace(/\bSociedade\s+Desportiva\b/gi, ' ')
+    .replace(/\bSociedade\s+An[oó]nima\s+Desportiva\b/gi, ' ')
+    .replace(/\bSAD\b/gi, ' ')
+    .replace(/\bSDUQ\b/gi, ' ');
+}
+
+function baseClubName(s) {
+  let x = stripLegalSuffixes(s);
+
+  // FPF/football PDFs often append legal/formal designations.
+  x = x.replace(/\s*\/\s*/g, ' ');
+  x = x.replace(/\bOAF\b/gi, ' ');
+  x = x.replace(/\bS\.?D\.?\b/gi, ' ');
+  x = x.replace(/\bS\.?C\.?\b/gi, ' ');
+  x = x.replace(/\bF\.?C\.?\b/gi, ' ');
+  x = x.replace(/\bC\.?P\.?\b/gi, ' CP ');
+  x = x.replace(/\bC\.?D\.?\b/gi, ' CD ');
+  x = x.replace(/\bC\.?\b(?=\s|$)/gi, ' ');
+
+  // Do not remove meaningful words such as "Sporting" or "Atlético".
+  return clean(x);
+}
+
+function norm(s) {
+  return baseClubName(s)
     .toLowerCase()
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
-    .replace(/\b(sad|sduq|futebol clube|futebol|clube|sporting clube|sociedade desportiva)\b/g, ' ')
+    .replace(/\b(sad|sduq|sociedade|desportiva|futebol|clube|sporting clube)\b/g, ' ')
     .replace(/[^a-z0-9]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+function variants(team) {
+  const original = clean(team);
+  const base = baseClubName(original);
+
+  const values = [
+    original,
+    base,
+    base.replace(/\bAtlético\b/gi, 'Atletico'),
+    base.replace(/\bSporting\b/gi, 'Sporting Clube'),
+    base.replace(/\bAcadémica\b/gi, 'Academica'),
+    base.replace(/\bSão\b/gi, 'Sao'),
+    base.replace(/\bSC\b/gi, 'Sporting Clube'),
+    base.replace(/\bFC\b/gi, 'Futebol Clube')
+  ];
+
+  // Also search the compact core, useful for ZeroZero/Wikipedia.
+  const core = norm(base);
+  if (core) values.push(core);
+
+  return [...new Set(values.map(clean).filter(Boolean))];
+}
+
+function tokenSimilarity(a, b) {
+  const aa = norm(a).split(' ').filter(w => w.length >= 2);
+  const bb = norm(b).split(' ').filter(w => w.length >= 2);
+  if (!aa.length || !bb.length) return 0;
+
+  const setA = new Set(aa);
+  const setB = new Set(bb);
+  let common = 0;
+  for (const w of setA) if (setB.has(w)) common++;
+
+  const coverageA = common / setA.size;
+  const coverageB = common / setB.size;
+  const union = new Set([...setA, ...setB]).size;
+  const jaccard = common / Math.max(union, 1);
+
+  return Math.round(
+    100 * Math.max(
+      coverageA * 0.78 + coverageB * 0.22,
+      jaccard
+    )
+  );
 }
 
 function scoreName(candidate, team) {
@@ -23,10 +95,22 @@ function scoreName(candidate, team) {
   const b = norm(team);
   if (!a || !b) return 0;
   if (a === b) return 100;
-  if (a.includes(b) || b.includes(a)) return 88;
-  const words = b.split(' ').filter(w => w.length >= 3);
-  const hit = words.filter(w => a.includes(w)).length;
-  return Math.round(72 * hit / Math.max(words.length, 1));
+  if (a.includes(b) || b.includes(a)) return 94;
+
+  const sim = tokenSimilarity(candidate, team);
+  const base = baseClubName(team);
+  const candBase = baseClubName(candidate);
+
+  // Reward a strong match after legal suffixes are removed.
+  if (norm(candBase) === norm(base)) return 100;
+
+  return sim;
+}
+
+function searchQueries(team, suffix = '') {
+  return variants(team)
+    .slice(0, 5)
+    .map(v => suffix ? `${v} ${suffix}`.trim() : v);
 }
 
 function timeout(ms) {
@@ -79,20 +163,35 @@ function htmlTitle(html) {
 
 async function fromWikidata(team) {
   try {
-    const q = encodeURIComponent(team);
-    const search = await fetchJson(
-      `https://www.wikidata.org/w/api.php?action=wbsearchentities&search=${q}&language=pt&uselang=pt&format=json&limit=6`,
-      3000
-    );
-    const hits = (search?.search || [])
-      .map(x => ({ id: x.id, label: x.label || '', description: x.description || '' }))
-      .filter(x => scoreName(x.label, team) >= 45)
-      .sort((a, b) => scoreName(b.label, team) - scoreName(a.label, team));
+    const hitsMap = new Map();
 
-    for (const hit of hits.slice(0, 4)) {
+    for (const query of searchQueries(team)) {
+      const q = encodeURIComponent(query);
+      const search = await fetchJson(
+        `https://www.wikidata.org/w/api.php?action=wbsearchentities&search=${q}&language=pt&uselang=pt&format=json&limit=8`,
+        2500
+      );
+
+      for (const x of (search?.search || [])) {
+        if (!x.id) continue;
+        const hit = {
+          id: x.id,
+          label: x.label || '',
+          description: x.description || ''
+        };
+        const score = scoreName(hit.label, team);
+        if (score >= 45) hitsMap.set(hit.id, { ...hit, score });
+      }
+    }
+
+    const hits = [...hitsMap.values()]
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 6);
+
+    for (const hit of hits) {
       const entity = await fetchJson(
         `https://www.wikidata.org/w/api.php?action=wbgetentities&ids=${encodeURIComponent(hit.id)}&props=claims|labels&languages=pt|en&format=json`,
-        3000
+        2500
       );
       const claims = entity?.entities?.[hit.id]?.claims || {};
       const logo = claims.P154?.[0]?.mainsnak?.datavalue?.value;
@@ -101,12 +200,19 @@ async function fromWikidata(team) {
       const title = `File:${logo}`;
       const info = await fetchJson(
         `https://commons.wikimedia.org/w/api.php?action=query&titles=${encodeURIComponent(title)}&prop=imageinfo&iiprop=url|mime&iiurlwidth=256&format=json&origin=*`,
-        3000
+        2500
       );
       const page = Object.values(info?.query?.pages || {})[0];
       const ii = page?.imageinfo?.[0];
       const url = ii?.thumburl || ii?.url;
-      if (url) return { url, name: hit.label, source: `Wikidata/Wikimedia Commons — ${logo}`, score: Math.min(100, scoreName(hit.label, team) + 8) };
+      if (url) {
+        return {
+          url,
+          name: hit.label,
+          source: `Wikidata/Wikimedia Commons — ${logo}`,
+          score: Math.min(100, hit.score + 8)
+        };
+      }
     }
   } catch (e) {
     console.warn('Wikidata shield lookup failed:', team, e?.message || e);
@@ -116,21 +222,35 @@ async function fromWikidata(team) {
 
 async function fromWikipedia(team) {
   try {
-    const q = encodeURIComponent(`${team} clube futebol Portugal`);
-    const data = await fetchJson(
-      `https://pt.wikipedia.org/w/api.php?action=query&generator=search&gsrsearch=${q}&gsrnamespace=0&gsrlimit=6&prop=pageimages|info&piprop=thumbnail&pilimit=6&pithumbsize=256&format=json&origin=*`,
-      3000
-    );
-    const candidates = Object.values(data?.query?.pages || {})
-      .map(p => ({
-        title: p.title || '',
-        url: p.thumbnail?.source || '',
-        score: scoreName(p.title || '', team)
-      }))
-      .filter(x => x.url && x.score >= 45)
+    const candidatesMap = new Map();
+
+    for (const query of searchQueries(team, 'clube futebol Portugal')) {
+      const q = encodeURIComponent(query);
+      const data = await fetchJson(
+        `https://pt.wikipedia.org/w/api.php?action=query&generator=search&gsrsearch=${q}&gsrnamespace=0&gsrlimit=8&prop=pageimages|info&piprop=thumbnail&pilimit=8&pithumbsize=256&format=json&origin=*`,
+        2500
+      );
+
+      for (const p of Object.values(data?.query?.pages || {})) {
+        const score = scoreName(p.title || '', team);
+        if (p.thumbnail?.source && score >= 42) {
+          const key = p.pageid || p.title;
+          candidatesMap.set(key, {
+            title: p.title || '',
+            url: p.thumbnail.source,
+            score
+          });
+        }
+      }
+    }
+
+    const candidates = [...candidatesMap.values()]
       .sort((a, b) => b.score - a.score);
+
     const c = candidates[0];
-    return c ? { url: c.url, name: c.title, source: `Wikipedia — ${c.title}`, score: c.score } : null;
+    return c
+      ? { url: c.url, name: c.title, source: `Wikipedia — ${c.title}`, score: c.score }
+      : null;
   } catch (e) {
     console.warn('Wikipedia shield lookup failed:', team, e?.message || e);
     return null;
@@ -139,25 +259,43 @@ async function fromWikipedia(team) {
 
 async function fromZeroZero(team) {
   try {
-    const q = encodeURIComponent(team);
-    const searchUrl = `https://www.zerozero.pt/search.php?search_string=${q}`;
-    const html = await fetchText(searchUrl, 3500);
-    if (!html) return null;
+    const all = [];
 
-    const links = [];
-    const re = /<a[^>]+href=["'](?:https?:\/\/www\.zerozero\.pt)?\/team\.php\?id=(\d+)[^"']*["'][^>]*>([\s\S]*?)<\/a>/gi;
-    let m;
-    while ((m = re.exec(html)) && links.length < 12) {
-      const label = clean(m[2].replace(/<[^>]+>/g, ''));
-      if (!label) continue;
-      links.push({ id: m[1], label, score: scoreName(label, team) });
+    for (const query of searchQueries(team)) {
+      const q = encodeURIComponent(query);
+      const html = await fetchText(
+        `https://www.zerozero.pt/search.php?search_string=${q}`,
+        3000
+      );
+      if (!html) continue;
+
+      const re = /<a[^>]+href=["'](?:https?:\/\/(?:www\.)?zerozero\.pt)?\/team\.php\?id=(\d+)[^"']*["'][^>]*>([\s\S]*?)<\/a>/gi;
+      let m;
+
+      while ((m = re.exec(html))) {
+        const label = clean(m[2].replace(/<[^>]+>/g, ''));
+        if (!label) continue;
+
+        all.push({
+          id: m[1],
+          label,
+          score: scoreName(label, team)
+        });
+
+        if (all.length >= 30) break;
+      }
     }
 
-    links.sort((a, b) => b.score - a.score);
-    const best = links.find(x => x.score >= 50);
+    const unique = [...new Map(all.map(x => [x.id, x])).values()]
+      .sort((a, b) => b.score - a.score);
+
+    const best = unique.find(x => x.score >= 48);
     if (!best) return null;
 
-    const page = await fetchText(`https://www.zerozero.pt/team.php?id=${best.id}`, 3500);
+    const page = await fetchText(
+      `https://www.zerozero.pt/team.php?id=${best.id}`,
+      3000
+    );
     if (!page) return null;
 
     const metas = [
@@ -169,15 +307,34 @@ async function fromZeroZero(team) {
     for (const rx of metas) {
       const hit = page.match(rx);
       const url = absoluteUrl(hit?.[1], 'https://www.zerozero.pt/');
-      if (url) return { url, name: best.label, source: `zerozero.pt — ${best.label}`, score: Math.min(100, best.score + 5) };
+      if (url) {
+        return {
+          url,
+          name: best.label,
+          source: `zerozero.pt — ${best.label}`,
+          score: Math.min(100, best.score + 7)
+        };
+      }
     }
 
-    // Last resort: look for an image URL in the page that contains logo/escudo/badge.
-    const imgs = [...page.matchAll(/<img[^>]+(?:src|data-src)=["']([^"']+)["'][^>]*>/gi)]
+    const imgs = [...page.matchAll(
+      /<img[^>]+(?:src|data-src)=["']([^"']+)["'][^>]*>/gi
+    )]
       .map(x => absoluteUrl(x[1], 'https://www.zerozero.pt/'))
       .filter(isImageUrl);
-    const likely = imgs.find(u => /logo|escudo|badge|equipa|team/i.test(u));
-    if (likely) return { url: likely, name: best.label, source: `zerozero.pt — ${best.label}`, score: best.score };
+
+    const likely = imgs.find(u =>
+      /logo|escudo|badge|equipa|team|clube|crest/i.test(u)
+    );
+
+    if (likely) {
+      return {
+        url: likely,
+        name: best.label,
+        source: `zerozero.pt — ${best.label}`,
+        score: best.score
+      };
+    }
   } catch (e) {
     console.warn('zerozero shield lookup failed:', team, e?.message || e);
   }
@@ -186,22 +343,44 @@ async function fromZeroZero(team) {
 
 async function fromCommons(team) {
   try {
-    const q = encodeURIComponent(`${team} football logo crest`);
-    const data = await fetchJson(
-      `https://commons.wikimedia.org/w/api.php?action=query&generator=search&gsrsearch=${q}&gsrnamespace=6&gsrlimit=8&prop=imageinfo&iiprop=url|mime&iiurlwidth=256&format=json&origin=*`,
-      3500
-    );
-    const candidates = Object.values(data?.query?.pages || {})
-      .map(p => ({
-        title: p.title || '',
-        url: p.imageinfo?.[0]?.thumburl || p.imageinfo?.[0]?.url || '',
-        mime: p.imageinfo?.[0]?.thumbmime || p.imageinfo?.[0]?.mime || '',
-        score: scoreName(p.title || '', team)
-      }))
-      .filter(x => x.url && /^image\/(png|jpeg|jpg|webp)$/i.test(x.mime) && x.score >= 35)
+    const candidatesMap = new Map();
+
+    for (const query of searchQueries(team, 'football logo crest')) {
+      const q = encodeURIComponent(query);
+      const data = await fetchJson(
+        `https://commons.wikimedia.org/w/api.php?action=query&generator=search&gsrsearch=${q}&gsrnamespace=6&gsrlimit=10&prop=imageinfo&iiprop=url|mime&iiurlwidth=256&format=json&origin=*`,
+        3000
+      );
+
+      for (const p of Object.values(data?.query?.pages || {})) {
+        const ii = p.imageinfo?.[0];
+        const url = ii?.thumburl || ii?.url || '';
+        const mime = ii?.thumbmime || ii?.mime || '';
+        const score = scoreName(p.title || '', team);
+
+        if (url && /^image\/(png|jpeg|jpg|webp)$/i.test(mime) && score >= 35) {
+          candidatesMap.set(p.pageid || p.title, {
+            title: p.title || '',
+            url,
+            mime,
+            score
+          });
+        }
+      }
+    }
+
+    const candidates = [...candidatesMap.values()]
       .sort((a, b) => b.score - a.score);
+
     const c = candidates[0];
-    return c ? { url: c.url, name: c.title, source: `Wikimedia Commons — ${c.title}`, score: c.score } : null;
+    return c
+      ? {
+          url: c.url,
+          name: c.title,
+          source: `Wikimedia Commons — ${c.title}`,
+          score: c.score
+        }
+      : null;
   } catch (e) {
     console.warn('Commons shield lookup failed:', team, e?.message || e);
     return null;
@@ -239,12 +418,19 @@ async function resolveOnline(team) {
     .map(r => r.value)
     .sort((a, b) => b.score - a.score);
 
-  // Try the strongest candidates first. If an image server blocks a download,
-  // the next source can still succeed.
-  for (const c of candidates.slice(0, 4)) {
-    const imageDataUrl = await downloadAsDataUrl(c);
-    if (imageDataUrl) return { imageDataUrl, source: c.source, title: c.name };
+  // Download several strong candidates in parallel. The first successful
+  // download wins, avoiding long waits when one image host is slow.
+  const top = candidates.slice(0, 6);
+  const downloads = await Promise.allSettled(top.map(downloadAsDataUrl));
+
+  for (let i = 0; i < downloads.length; i++) {
+    const d = downloads[i];
+    if (d.status === 'fulfilled' && d.value) {
+      const c = top[i];
+      return { imageDataUrl: d.value, source: c.source, title: c.name };
+    }
   }
+
   return null;
 }
 
