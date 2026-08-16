@@ -457,12 +457,8 @@ async function loadFirst(key, urls) {
 }
 
 async function loadIdentity() {
-  await loadFirst('logo', [
-    '/fotografias/logo.png',
-    '/fotografias/logo.jpeg',
-    '/fotografias/logo.jpg'
-  ]);
-
+  // O fundo já contém o cabeçalho e o logótipo original do Núcleo.
+  // Não carregar nem desenhar um segundo logótipo por cima.
   await loadFirst('background', [
     '/assets/fundo_nomeacao.png'
   ]);
@@ -666,144 +662,163 @@ function fit(ctx, text, max, start, min = 24) {
 }
 
 function render(game) {
-  // IMPORTANTE: esta função é APENAS gráfica.
-  // A leitura do PDF, separação das colunas e identificação dos oficiais
-  // permanece exatamente na versão rápida/robusta anterior.
+  // MONTAGEM FINAL — o fundo é uma imagem fornecida pelo Núcleo e já contém
+  // o cabeçalho e o logótipo original. A função apenas coloca a informação
+  // variável da nomeação por cima, sem alterar o fundo.
   const canvas = document.createElement('canvas');
   canvas.width = 1080;
   canvas.height = 1920;
   const ctx = canvas.getContext('2d');
 
   const bg = state.assets.get('background');
-  if (bg) ctx.drawImage(bg, 0, 0, 1080, 1920);
-  else {
-    ctx.fillStyle = '#1d2b32';
-    ctx.fillRect(0, 0, 1080, 1920);
+  if (bg) {
+    ctx.drawImage(bg, 0, 0, canvas.width, canvas.height);
+  } else {
+    ctx.fillStyle = '#17272e';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
   }
 
-  const logo = state.assets.get('logo');
-  if (logo) drawContain(ctx, logo, 55, 35, 150, 150);
+  const GOLD = '#E7B63D';
+  const WHITE = '#F7F7F5';
+  const PANEL = 'rgba(10, 22, 28, 0.72)';
+  const BORDER = 'rgba(231, 182, 61, 0.55)';
 
-  // Cabeçalho — identidade do Núcleo
-  ctx.textAlign = 'left';
-  ctx.fillStyle = '#f5f7f8';
-  ctx.font = '700 19px Arial';
-  ctx.fillText('NÚCLEO DE ÁRBITROS DE FUTEBOL MARQUES BOM • COIMBRA', 225, 62);
+  function panel(x, y, w, h, radius = 28) {
+    ctx.save();
+    ctx.fillStyle = PANEL;
+    ctx.strokeStyle = BORDER;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, radius);
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+  }
 
-  // Chamada pedida para Instagram Story
-  ctx.font = '700 58px Arial';
-  ctx.fillText('#TambemEstamosEmJogo', 225, 145);
+  // ------------------------------------------------------------
+  // HASHTAG / IDENTIDADE DA PUBLICAÇÃO
+  // O cabeçalho do fundo já contém o nome e o logo do Núcleo.
+  // ------------------------------------------------------------
+  ctx.textAlign = 'center';
+  ctx.fillStyle = GOLD;
+  ctx.font = '800 52px Arial';
+  ctx.fillText('#TambemEstamosEmJogo', 540, 155);
 
-  // Competição mais forte visualmente
-  ctx.fillStyle = '#e7b63d';
-  const compSize = fit(ctx, game.competition, 900, 46, 30);
-  ctx.font = `700 ${compSize}px Arial`;
-  ctx.fillText(game.competition, 70, 260);
+  // ------------------------------------------------------------
+  // COMPETIÇÃO — destaque principal
+  // ------------------------------------------------------------
+  const competition = String(game.competition || '').trim();
+  const compSize = fit(ctx, competition, 930, 58, 32);
+  ctx.fillStyle = WHITE;
+  ctx.font = `800 ${compSize}px Arial`;
+  ctx.fillText(competition, 540, 245);
 
-  // Separador visual
-  ctx.strokeStyle = 'rgba(231,182,61,.85)';
-  ctx.lineWidth = 3;
+  ctx.strokeStyle = GOLD;
+  ctx.lineWidth = 4;
   ctx.beginPath();
-  ctx.moveTo(70, 290);
-  ctx.lineTo(1010, 290);
+  ctx.moveTo(120, 275);
+  ctx.lineTo(960, 275);
   ctx.stroke();
 
-  // Equipas + escudos. NÃO se faz qualquer pesquisa nesta função.
+  // ------------------------------------------------------------
+  // JOGO + ESCUDOS
+  // ------------------------------------------------------------
+  const gameY = 315;
+  const gameH = 355;
+  panel(55, gameY, 970, gameH, 30);
+
   const homeShield = state.assets.get('s:' + compact(game.home)) || null;
   const awayShield = state.assets.get('s:' + compact(game.away)) || null;
 
-  // Caixa central do jogo, mantendo a distribuição da versão que estava boa.
-  ctx.fillStyle = 'rgba(14,24,30,.72)';
-  ctx.beginPath();
-  ctx.roundRect(45, 335, 990, 355, 28);
-  ctx.fill();
-  ctx.strokeStyle = 'rgba(231,182,61,.38)';
-  ctx.lineWidth = 2;
-  ctx.stroke();
+  // Escudos grandes e independentes dos nomes.
+  if (homeShield) drawContain(ctx, homeShield, 85, gameY + 70, 205, 205);
+  if (awayShield) drawContain(ctx, awayShield, 790, gameY + 70, 205, 205);
 
-  // Escudo esquerdo
-  if (homeShield) drawContain(ctx, homeShield, 85, 405, 205, 190);
-  // Escudo direito
-  if (awayShield) drawContain(ctx, awayShield, 790, 405, 205, 190);
-
-  // Nomes das equipas
-  ctx.fillStyle = '#f5f7f8';
-  ctx.font = '700 30px Arial';
-  wrap(ctx, game.home, 315, 440, 410, 38, 2);
-  wrap(ctx, game.away, 315, 545, 410, 38, 2);
-
+  ctx.fillStyle = WHITE;
   ctx.textAlign = 'center';
-  ctx.fillStyle = '#e7b63d';
-  ctx.font = '700 38px Arial';
-  ctx.fillText('VS', 540, 515);
-  ctx.textAlign = 'left';
+  const teamSize = Math.min(
+    fit(ctx, game.home, 420, 34, 22),
+    fit(ctx, game.away, 420, 34, 22)
+  );
+  ctx.font = `800 ${teamSize}px Arial`;
+  wrap(ctx, game.home, 540, gameY + 105, 430, teamSize + 7, 2);
+  ctx.fillStyle = GOLD;
+  ctx.font = '900 42px Arial';
+  ctx.fillText('VS', 540, gameY + 205);
+  ctx.fillStyle = WHITE;
+  ctx.font = `800 ${teamSize}px Arial`;
+  wrap(ctx, game.away, 540, gameY + 275, 430, teamSize + 7, 2);
 
-  // Oficiais — moldura branca inspirada diretamente na amostra enviada.
-  const count = game.officials.length;
-  const h = count <= 1 ? 420 : count === 2 ? 300 : count === 3 ? 235 : count === 4 ? 205 : 175;
-  const start = count <= 2 ? 745 : 735;
+  // ------------------------------------------------------------
+  // OFICIAIS — cartões com fotografia dentro da moldura branca
+  // ------------------------------------------------------------
+  const officials = game.officials || [];
+  const count = officials.length;
+  const availableTop = 720;
+  const footerTop = 1770;
+  const gap = 22;
+  const totalAvailable = footerTop - availableTop;
+  const cardH = Math.max(190, Math.min(360,
+    Math.floor((totalAvailable - gap * Math.max(0, count - 1)) / Math.max(1, count))
+  ));
 
-  for (let i = 0; i < count; i++) {
-    const o = game.officials[i];
-    const y = start + i * (h + 18);
+  officials.forEach((o, i) => {
+    const y = availableTop + i * (cardH + gap);
+    panel(55, y, 970, cardH, 30);
 
-    ctx.fillStyle = 'rgba(14,24,30,.72)';
-    ctx.beginPath();
-    ctx.roundRect(45, y, 990, h, 28);
-    ctx.fill();
+    // Caixa branca da fotografia — forma inspirada diretamente na amostra.
+    const photoX = 82;
+    const photoY = y + 22;
+    const photoW = Math.min(300, cardH - 44);
+    const photoH = cardH - 44;
 
-    ctx.strokeStyle = 'rgba(231,182,61,.38)';
-    ctx.lineWidth = 2;
-    ctx.stroke();
+    ctx.fillStyle = WHITE;
+    ctx.fillRect(photoX, photoY, photoW, photoH);
 
     const photo = state.assets.get('p:' + compact(o.name)) || null;
-
-    // Moldura branca / fotografia — sem alterar a fotografia original.
-    const px = 75;
-    const py = y + (h > 250 ? 28 : 20);
-    const pw = h > 250 ? 255 : 190;
-    const ph = h > 250 ? h - 56 : h - 40;
-
-    ctx.fillStyle = '#f5f2e8';
-    ctx.fillRect(px, py, pw, ph);
-
     if (photo) {
-      const pad = h > 250 ? 12 : 9;
-      drawCover(ctx, photo, px + pad, py + pad, pw - pad * 2, ph - pad * 2, 0);
+      const pad = 12;
+      drawCover(ctx, photo, photoX + pad, photoY + pad,
+        photoW - pad * 2, photoH - pad * 2, 0);
     } else {
-      ctx.fillStyle = '#60727b';
-      ctx.fillRect(px + 10, py + 10, pw - 20, ph - 20);
-      ctx.fillStyle = '#f5f7f8';
+      ctx.fillStyle = '#586b73';
+      ctx.fillRect(photoX + 12, photoY + 12, photoW - 24, photoH - 24);
+      ctx.fillStyle = WHITE;
       ctx.font = '700 18px Arial';
       ctx.textAlign = 'center';
-      ctx.fillText('FOTOGRAFIA', px + pw / 2, py + ph / 2);
-      ctx.textAlign = 'left';
+      ctx.fillText('FOTOGRAFIA', photoX + photoW / 2, photoY + photoH / 2);
     }
 
-    ctx.fillStyle = '#e7b63d';
-    ctx.font = `700 ${count <= 2 ? 27 : 19}px Arial`;
-    ctx.fillText(o.role.toUpperCase(), px + pw + 40, y + 70);
+    // Informação do oficial à direita.
+    const tx = photoX + photoW + 55;
+    const tw = 555;
+    ctx.textAlign = 'left';
+    ctx.fillStyle = GOLD;
+    const roleSize = fit(ctx, String(o.role || '').toUpperCase(), tw, 28, 18);
+    ctx.font = `800 ${roleSize}px Arial`;
+    ctx.fillText(String(o.role || '').toUpperCase(), tx, y + 78);
 
-    ctx.fillStyle = '#f5f7f8';
-    const nameSize = fit(ctx, o.name, 610, count <= 2 ? 50 : 40, 24);
-    ctx.font = `700 ${nameSize}px Arial`;
-    wrap(ctx, o.name, px + pw + 40, y + 145, 610, nameSize + 8, 2);
-  }
+    ctx.fillStyle = WHITE;
+    const nameSize = fit(ctx, o.name, tw, count <= 2 ? 52 : 42, 25);
+    ctx.font = `800 ${nameSize}px Arial`;
+    wrap(ctx, o.name, tx, y + 155, tw, nameSize + 9, 2);
+  });
 
-  // Rodapé — identidade do Núcleo
+  // ------------------------------------------------------------
+  // RODAPÉ — discreto, sem competir com a nomeação
+  // ------------------------------------------------------------
   ctx.textAlign = 'center';
-  ctx.fillStyle = '#f5f7f8';
-  ctx.font = '700 21px Arial';
-  ctx.fillText('TRABALHO, COMPETÊNCIA E DEDICAÇÃO', 540, 1840);
+  ctx.fillStyle = WHITE;
+  ctx.font = '800 22px Arial';
+  ctx.fillText('TRABALHO, COMPETÊNCIA E DEDICAÇÃO', 540, 1830);
 
-  ctx.fillStyle = '#e7b63d';
+  ctx.fillStyle = GOLD;
   ctx.font = '700 16px Arial';
-  ctx.fillText('#MARQUESBOM  #ARBITRAGEM  #TambemEstamosEmJogo', 540, 1875);
-  ctx.textAlign = 'left';
+  ctx.fillText('#MARQUESBOM  •  #ARBITRAGEM', 540, 1865);
 
+  ctx.textAlign = 'left';
   return canvas;
 }
-
 function showGames() {
   $('results').innerHTML = state.games.map(g => `
     <div class="result">
@@ -824,8 +839,6 @@ async function checkAssets(games) {
   await loadIdentity();
 
   const missing = [];
-  if (!state.assets.has('logo')) missing.push({ type: 'logo', key: 'logo' });
-
   const people = [...new Map(
     games.flatMap(g => g.officials.map(o => [compact(o.name), o.name]))
   ).values()];
