@@ -344,8 +344,7 @@ function parsePage(page) {
       const dash = gameText.lastIndexOf(' - ');
       const home = gameText.slice(0, dash).trim();
       const away = gameText.slice(dash + 3).trim();
-      let listed = findListedName(official);
-      if (!listed) listed = findListedName(removeAssociation(text));
+      const listed = findListedName(official);
 
       current = {
         competition,
@@ -360,8 +359,7 @@ function parsePage(page) {
 
     // Continuation lines contain only the official + association columns.
     if (official && /^A\.?\s*F\.?/i.test(assoc) && current) {
-      let listed = findListedName(official);
-      if (!listed) listed = findListedName(removeAssociation(text));
+      const listed = findListedName(official);
       current.officials.push({
         name: listed || null,
         position: current.officials.length
@@ -466,7 +464,6 @@ async function loadIdentity() {
   ]);
 
   await loadFirst('background', [
-    '/assets/fundo_marques_bom.jpg',
     '/assets/fundo_nomeacao.png'
   ]);
 }
@@ -493,20 +490,13 @@ async function personImage(name) {
 }
 
 function teamVariants(team) {
-  const original = String(team || '').trim();
-  const legalClean = original
-    .replace(/(?:\s+|\/)OAF\s+SDUQ\s*$/i, '')
-    .replace(/(?:\s+|\/)(?:SAD|SDUQ|OAF)\s*$/i, '')
-    .replace(/\s+/g, ' ')
-    .trim();
-
-  const variants = new Set([
-    original,
-    legalClean,
-    original.replace(/[,.]/g, '').trim(),
-    legalClean.replace(/[,.]/g, '').trim()
+  const a = new Set([
+    team.trim(),
+    team.replace(/\bSAD\b/ig, '').replace(/\bSDUQ\b/ig, '').trim(),
+    team.replace(/[,.]/g, '').trim()
   ]);
-  return [...variants].filter(Boolean);
+
+  return [...a].filter(Boolean);
 }
 
 async function searchRemoteShield(team, timeoutMs = 4500) {
@@ -675,184 +665,142 @@ function fit(ctx, text, max, start, min = 24) {
   return s;
 }
 
-async function render(game) {
+function render(game) {
+  // IMPORTANTE: esta função é APENAS gráfica.
+  // A leitura do PDF, separação das colunas e identificação dos oficiais
+  // permanece exatamente na versão rápida/robusta anterior.
   const canvas = document.createElement('canvas');
   canvas.width = 1080;
   canvas.height = 1920;
-
   const ctx = canvas.getContext('2d');
-  ctx.imageSmoothingEnabled = true;
-  ctx.imageSmoothingQuality = 'high';
 
-  /*
-   * BASE VISUAL:
-   * Usa sempre a imagem fornecida pelo Núcleo em:
-   * /assets/fundo_nomeacao.png
-   *
-   * Não desenhamos outro fundo nem alteramos o logótipo da imagem.
-   */
   const bg = state.assets.get('background');
-
-  if (bg) {
-    const iw = bg.naturalWidth || bg.width;
-    const ih = bg.naturalHeight || bg.height;
-    const scale = Math.max(canvas.width / iw, canvas.height / ih);
-    const dw = iw * scale;
-    const dh = ih * scale;
-
-    // Mantém a imagem centrada e cobre todo o Story 9:16.
-    ctx.drawImage(
-      bg,
-      (canvas.width - dw) / 2,
-      (canvas.height - dh) / 2,
-      dw,
-      dh
-    );
-  } else {
+  if (bg) ctx.drawImage(bg, 0, 0, 1080, 1920);
+  else {
     ctx.fillStyle = '#1d2b32';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillRect(0, 0, 1080, 1920);
   }
 
-  /*
-   * Os dados variáveis ficam em zonas limpas da composição.
-   * O visual da imagem-base é preservado.
-   */
-  const GOLD = '#e7b63d';
-  const WHITE = '#f5f7f8';
+  const logo = state.assets.get('logo');
+  if (logo) drawContain(ctx, logo, 55, 35, 150, 150);
 
-  // Barra discreta para os dados do jogo, sem mudar o fundo.
-  ctx.fillStyle = 'rgba(10,18,23,.72)';
+  // Cabeçalho — identidade do Núcleo
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#f5f7f8';
+  ctx.font = '700 19px Arial';
+  ctx.fillText('NÚCLEO DE ÁRBITROS DE FUTEBOL MARQUES BOM • COIMBRA', 225, 62);
+
+  // Chamada pedida para Instagram Story
+  ctx.font = '700 58px Arial';
+  ctx.fillText('#TambemEstamosEmJogo', 225, 145);
+
+  // Competição mais forte visualmente
+  ctx.fillStyle = '#e7b63d';
+  const compSize = fit(ctx, game.competition, 900, 46, 30);
+  ctx.font = `700 ${compSize}px Arial`;
+  ctx.fillText(game.competition, 70, 260);
+
+  // Separador visual
+  ctx.strokeStyle = 'rgba(231,182,61,.85)';
+  ctx.lineWidth = 3;
   ctx.beginPath();
-  ctx.roundRect(45, 700, 990, 235, 28);
-  ctx.fill();
+  ctx.moveTo(70, 290);
+  ctx.lineTo(1010, 290);
+  ctx.stroke();
 
-  // Competição
-  ctx.textAlign = 'center';
-  ctx.fillStyle = GOLD;
-  const compSize = fit(ctx, game.competition || '', 900, 48, 28);
-  ctx.font = `800 ${compSize}px Arial`;
-  wrap(ctx, game.competition || '', 540, 770, 900, compSize + 8, 2);
-
-  // Equipas + escudos
+  // Equipas + escudos. NÃO se faz qualquer pesquisa nesta função.
   const homeShield = state.assets.get('s:' + compact(game.home)) || null;
   const awayShield = state.assets.get('s:' + compact(game.away)) || null;
 
-  drawContain(ctx, homeShield, 90, 820, 150, 105);
-  drawContain(ctx, awayShield, 840, 820, 150, 105);
+  // Caixa central do jogo, mantendo a distribuição da versão que estava boa.
+  ctx.fillStyle = 'rgba(14,24,30,.72)';
+  ctx.beginPath();
+  ctx.roundRect(45, 335, 990, 355, 28);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(231,182,61,.38)';
+  ctx.lineWidth = 2;
+  ctx.stroke();
 
-  ctx.fillStyle = WHITE;
-  const homeSize = fit(ctx, game.home, 500, 28, 18);
-  const awaySize = fit(ctx, game.away, 500, 28, 18);
+  // Escudo esquerdo
+  if (homeShield) drawContain(ctx, homeShield, 85, 405, 205, 190);
+  // Escudo direito
+  if (awayShield) drawContain(ctx, awayShield, 790, 405, 205, 190);
 
-  ctx.font = `800 ${homeSize}px Arial`;
-  wrap(ctx, game.home, 255, 855, 300, homeSize + 5, 2);
+  // Nomes das equipas
+  ctx.fillStyle = '#f5f7f8';
+  ctx.font = '700 30px Arial';
+  wrap(ctx, game.home, 315, 440, 410, 38, 2);
+  wrap(ctx, game.away, 315, 545, 410, 38, 2);
 
-  ctx.fillStyle = GOLD;
-  ctx.font = '900 32px Arial';
-  ctx.fillText('VS', 540, 880);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#e7b63d';
+  ctx.font = '700 38px Arial';
+  ctx.fillText('VS', 540, 515);
+  ctx.textAlign = 'left';
 
-  ctx.fillStyle = WHITE;
-  ctx.font = `800 ${awaySize}px Arial`;
-  wrap(ctx, game.away, 610, 855, 220, awaySize + 5, 2);
-
-  /*
-   * Fotografias:
-   * usa exatamente o estilo da imagem fornecida:
-   * moldura branca, fotografia contida e nome por baixo.
-   */
+  // Oficiais — moldura branca inspirada diretamente na amostra enviada.
   const count = game.officials.length;
-  const positions = (() => {
-    if (count <= 1) return [{ x: 270, y: 1020, w: 540, h: 430 }];
-    if (count === 2) return [
-      { x: 70, y: 1015, w: 420, h: 360 },
-      { x: 590, y: 1015, w: 420, h: 360 }
-    ];
-    if (count === 3) return [
-      { x: 45, y: 1000, w: 300, h: 345 },
-      { x: 390, y: 1000, w: 300, h: 345 },
-      { x: 735, y: 1000, w: 300, h: 345 }
-    ];
-    return [
-      { x: 45, y: 990, w: 300, h: 335 },
-      { x: 390, y: 990, w: 300, h: 335 },
-      { x: 735, y: 990, w: 300, h: 335 },
-      { x: 217, y: 1360, w: 300, h: 335 }
-    ];
-  })();
+  const h = count <= 1 ? 420 : count === 2 ? 300 : count === 3 ? 235 : count === 4 ? 205 : 175;
+  const start = count <= 2 ? 745 : 735;
 
   for (let i = 0; i < count; i++) {
     const o = game.officials[i];
-    const p = positions[i];
-    const photo = await personImage(o.name);
+    const y = start + i * (h + 18);
 
-    // Moldura branca igual à referência.
-    ctx.fillStyle = '#f7f4e8';
-    ctx.fillRect(p.x, p.y, p.w, p.h);
+    ctx.fillStyle = 'rgba(14,24,30,.72)';
+    ctx.beginPath();
+    ctx.roundRect(45, y, 990, h, 28);
+    ctx.fill();
 
-    const innerPad = Math.max(12, Math.round(p.w * 0.035));
-    const labelH = Math.max(58, Math.round(p.h * 0.18));
+    ctx.strokeStyle = 'rgba(231,182,61,.38)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    const photo = state.assets.get('p:' + compact(o.name)) || null;
+
+    // Moldura branca / fotografia — sem alterar a fotografia original.
+    const px = 75;
+    const py = y + (h > 250 ? 28 : 20);
+    const pw = h > 250 ? 255 : 190;
+    const ph = h > 250 ? h - 56 : h - 40;
+
+    ctx.fillStyle = '#f5f2e8';
+    ctx.fillRect(px, py, pw, ph);
 
     if (photo) {
-      drawCover(
-        ctx,
-        photo,
-        p.x + innerPad,
-        p.y + innerPad,
-        p.w - innerPad * 2,
-        p.h - labelH - innerPad * 1.5,
-        0
-      );
+      const pad = h > 250 ? 12 : 9;
+      drawCover(ctx, photo, px + pad, py + pad, pw - pad * 2, ph - pad * 2, 0);
     } else {
       ctx.fillStyle = '#60727b';
-      ctx.fillRect(
-        p.x + innerPad,
-        p.y + innerPad,
-        p.w - innerPad * 2,
-        p.h - labelH - innerPad * 1.5
-      );
+      ctx.fillRect(px + 10, py + 10, pw - 20, ph - 20);
+      ctx.fillStyle = '#f5f7f8';
+      ctx.font = '700 18px Arial';
+      ctx.textAlign = 'center';
+      ctx.fillText('FOTOGRAFIA', px + pw / 2, py + ph / 2);
+      ctx.textAlign = 'left';
     }
 
-    ctx.fillStyle = '#111';
-    const nameSize = fit(
-      ctx,
-      o.name,
-      p.w - 30,
-      count <= 2 ? 34 : 25,
-      17
-    );
-    ctx.font = `800 ${nameSize}px Arial`;
-    ctx.textAlign = 'center';
-    ctx.fillText(
-      o.name,
-      p.x + p.w / 2,
-      p.y + p.h - Math.max(24, labelH * .42)
-    );
+    ctx.fillStyle = '#e7b63d';
+    ctx.font = `700 ${count <= 2 ? 27 : 19}px Arial`;
+    ctx.fillText(o.role.toUpperCase(), px + pw + 40, y + 70);
 
-    // Função fora da moldura, em dourado.
-    ctx.fillStyle = GOLD;
-    ctx.font = `800 ${count <= 2 ? 24 : 19}px Arial`;
-    ctx.fillText(
-      o.role.toUpperCase(),
-      p.x + p.w / 2,
-      p.y + p.h + 38
-    );
+    ctx.fillStyle = '#f5f7f8';
+    const nameSize = fit(ctx, o.name, 610, count <= 2 ? 50 : 40, 24);
+    ctx.font = `700 ${nameSize}px Arial`;
+    wrap(ctx, o.name, px + pw + 40, y + 145, 610, nameSize + 8, 2);
   }
 
-  // Hashtag e assinatura visual no fundo inferior.
+  // Rodapé — identidade do Núcleo
   ctx.textAlign = 'center';
-  ctx.fillStyle = GOLD;
-  ctx.font = '800 34px Arial';
-  ctx.fillText('#TambemEstamosEmJogo', 540, 1785);
+  ctx.fillStyle = '#f5f7f8';
+  ctx.font = '700 21px Arial';
+  ctx.fillText('TRABALHO, COMPETÊNCIA E DEDICAÇÃO', 540, 1840);
 
-  ctx.fillStyle = WHITE;
-  ctx.font = '800 21px Arial';
-  ctx.fillText(
-    'TRABALHO • COMPETÊNCIA • DEDICAÇÃO',
-    540,
-    1835
-  );
-
+  ctx.fillStyle = '#e7b63d';
+  ctx.font = '700 16px Arial';
+  ctx.fillText('#MARQUESBOM  #ARBITRAGEM  #TambemEstamosEmJogo', 540, 1875);
   ctx.textAlign = 'left';
+
   return canvas;
 }
 
@@ -872,32 +820,6 @@ function showGames() {
   `).join('');
 }
 
-async function saveRemoteAsset(type, key, dataUrl) {
-  const endpoint = type === 'foto' ? '/api/foto' : '/api/escudo';
-  const body = type === 'foto'
-    ? { name: key, dataUrl }
-    : { team: key, dataUrl };
-
-  const r = await fetch(endpoint, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-    body: JSON.stringify(body)
-  });
-
-  const data = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(data?.error || `Falha ao guardar ${type} (${r.status})`);
-  return data;
-}
-
-async function imageFileToDataUrl(file) {
-  return await new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result);
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
-}
-
 async function checkAssets(games) {
   await loadIdentity();
 
@@ -908,6 +830,7 @@ async function checkAssets(games) {
     games.flatMap(g => g.officials.map(o => [compact(o.name), o.name]))
   ).values()];
 
+  // Photos are local. Load them all in parallel.
   const photoResults = await Promise.all(
     people.map(async name => [name, await personImage(name)])
   );
@@ -915,99 +838,89 @@ async function checkAssets(games) {
     if (!img) missing.push({ type: 'foto', key: name });
   }
 
-  // Never make a second slow online search here. Analyze() already warmed
-  // the shield cache. A missing shield is an actionable upload, not a fatal error.
+  // Shields are intentionally NOT searched here. By the time the user can
+  // click Generate they have already been warmed by analyze().
   for (const g of games) {
-    if (!state.assets.has('s:' + compact(g.home))) missing.push({ type: 'escudo', key: g.home });
-    if (!state.assets.has('s:' + compact(g.away))) missing.push({ type: 'escudo', key: g.away });
+    if (!state.assets.has('s:' + compact(g.home))) {
+      missing.push({ type: 'escudo', key: g.home });
+    }
+    if (!state.assets.has('s:' + compact(g.away))) {
+      missing.push({ type: 'escudo', key: g.away });
+    }
   }
 
   const unique = [...new Map(
     missing.map(x => [x.type + ':' + compact(x.key), x])
   ).values()];
 
-  if (unique.length) {
-    renderMissing(unique);
+  // Missing shields are shown, but do not cause another network lookup.
+  // Missing photos/logo still block the final publication.
+  const blocking = unique.filter(x => x.type !== 'escudo');
+  if (blocking.length) {
+    renderMissing(blocking);
     return false;
   }
 
-  $('missingAssets').hidden = true;
+  if (unique.length) renderMissing(unique);
+  else $('missingAssets').hidden = true;
   return true;
 }
 
 function renderMissing(items) {
-  const unique = [...new Map(
-    items.map(x => [x.type + ':' + compact(x.key), x])
-  ).values()];
+  const unique = [
+    ...new Map(
+      items.map(x => [x.type + ':' + compact(x.key), x])
+    ).values()
+  ];
 
   $('missingAssets').hidden = false;
+
   $('missingAssets').innerHTML = `
     <div class="missingBox">
-      <h3>Faltam ficheiros</h3>
-      <p>Carrega os que faltam. A aplicação usa-os imediatamente e tenta guardá-los automaticamente no GitHub.</p>
+      <h3>Faltam ficheiros antes de gerar</h3>
+      <p>O gerador bloqueia a criação para não sair uma publicação incompleta.</p>
       ${unique.map(x => `
         <div class="missingRow">
-          <span><b>${x.type === 'foto' ? 'Fotografia' : x.type === 'escudo' ? 'Escudo' : 'Logo'}</b>: ${escapeHtml(x.key)}</span>
-          ${x.type === 'logo' ? '' : `
-          <input type="file" accept="image/png,image/jpeg,image/webp" data-key="${escapeHtml(x.type + '|' + x.key)}">`}
+          <span>
+            <b>${
+              x.type === 'foto'
+                ? 'Fotografia'
+                : x.type === 'escudo'
+                  ? 'Escudo'
+                  : 'Logo'
+            }</b>: ${escapeHtml(x.key)}
+          </span>
+          <input
+            type="file"
+            accept="image/png,image/jpeg,image/webp"
+            data-key="${escapeHtml(x.type + '|' + x.key)}"
+          >
         </div>
       `).join('')}
-      ${unique.some(x => x.type !== 'logo') ? '<button id="useMissing" class="secondary">Guardar ficheiros e continuar</button>' : ''}
+      <button id="useMissing" class="secondary">
+        Usar ficheiros nesta sessão
+      </button>
     </div>
   `;
 
-  const btn = $('useMissing');
-  if (!btn) return;
-
-  btn.onclick = async () => {
-    btn.disabled = true;
-    let saved = 0;
-    let failed = [];
-
+  $('useMissing').onclick = async () => {
     for (const input of $('missingAssets').querySelectorAll('input[type=file]')) {
       if (!input.files[0]) continue;
+
       const [type, key] = input.dataset.key.split('|');
+      const img = await fileToImage(input.files[0]);
 
-      try {
-        const dataUrl = await imageFileToDataUrl(input.files[0]);
-        const img = await fileToImage(input.files[0]);
-        const cacheKey = type === 'foto' ? 'p:' + compact(key) : 's:' + compact(key);
-        state.assets.set(cacheKey, img);
-
-        try {
-          await saveRemoteAsset(type, key, dataUrl);
-          saved++;
-        } catch (e) {
-          // The local/session image is still valid for this generation.
-          failed.push(`${key}: ${e.message}`);
-        }
-      } catch (e) {
-        failed.push(`${key}: ${e.message || e}`);
-      }
+      state.assets.set(
+        type === 'foto'
+          ? 'p:' + compact(key)
+          : type === 'escudo'
+            ? 's:' + compact(key)
+            : 'logo',
+        img
+      );
     }
 
-    btn.disabled = false;
-
-    const remaining = [];
-    for (const g of state.games) {
-      for (const team of [g.home, g.away]) {
-        if (!state.assets.has('s:' + compact(team))) remaining.push({ type: 'escudo', key: team });
-      }
-      for (const o of g.officials) {
-        if (!state.assets.has('p:' + compact(o.name))) remaining.push({ type: 'foto', key: o.name });
-      }
-    }
-
-    const uniqRemaining = [...new Map(remaining.map(x => [x.type + ':' + compact(x.key), x])).values()];
-    if (!uniqRemaining.length) {
-      $('missingAssets').hidden = true;
-      setStatus(`Ficheiros carregados. ${saved ? saved + ' ficheiro(s) guardado(s) no GitHub. ' : ''}Podes gerar os JPG.`);
-      return;
-    }
-
-    renderMissing(uniqRemaining);
-    setStatus(saved ? `${saved} ficheiro(s) guardado(s). Ainda faltam ficheiros.` : 'Os ficheiros foram carregados nesta sessão, mas ainda falta algum recurso.');
-    if (failed.length) console.warn('Falhas ao guardar no GitHub:', failed);
+    setStatus('Ficheiros carregados. Podes gerar novamente.');
   };
 }
 
@@ -1015,8 +928,13 @@ function fileToImage(file) {
   return new Promise((resolve, reject) => {
     const u = URL.createObjectURL(file);
     const img = new Image();
-    img.onload = () => { URL.revokeObjectURL(u); resolve(img); };
-    img.onerror = e => { URL.revokeObjectURL(u); reject(e); };
+
+    img.onload = () => {
+      URL.revokeObjectURL(u);
+      resolve(img);
+    };
+
+    img.onerror = reject;
     img.src = u;
   });
 }
