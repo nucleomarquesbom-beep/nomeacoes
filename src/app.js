@@ -469,34 +469,23 @@ async function loadIdentity() {
 }
 
 function personUrls(name) {
-  // GitHub/Vercel são case-sensitive. A fotografia deve ser encontrada
-  // mesmo que a lista/PDF use MAIÚSCULAS, minúsculas ou capitalização diferente.
-  const original = safeFile(name);
-  const normalized = normalizeText(name);
-  const noAccents = normalized.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-  const words = normalized.split(/\s+/).filter(Boolean);
-  const title = words.map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
-  const upper = normalized.toUpperCase();
-  const lower = normalized.toLowerCase();
-  const candidates = [...new Set([
-    original,
-    title,
-    lower,
-    upper,
-    noAccents,
-    noAccents.toUpperCase(),
-    noAccents.toLowerCase(),
-    noAccents.split(/\s+/).map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')
-  ].map(safeFile).filter(Boolean))];
+  const base = safeFile(name);
+  const variants = [...new Set([
+    base,
+    base.toLowerCase(),
+    base.toUpperCase(),
+    base.replace(/\b\w/g, c => c.toUpperCase())
+  ])];
 
   const urls = [];
-  for (const f of candidates) {
+  for (const f of variants) {
     for (const ext of ['jpg', 'jpeg', 'png', 'webp']) {
-      urls.push(`/fotografias/${f}.${ext}`);
+      urls.push(`/fotografias/${encodeURIComponent(f)}.${ext}`);
     }
   }
   return urls;
 }
+
 async function personImage(name) {
   const key = 'p:' + compact(name);
 
@@ -683,168 +672,158 @@ function fit(ctx, text, max, start, min = 24) {
   return s;
 }
 
+function roundRect(ctx, x, y, w, h, r, fill, stroke = null, lineWidth = 1) {
+  ctx.beginPath();
+  ctx.roundRect(x, y, w, h, r);
+  if (fill) {
+    ctx.fillStyle = fill;
+    ctx.fill();
+  }
+  if (stroke) {
+    ctx.strokeStyle = stroke;
+    ctx.lineWidth = lineWidth;
+    ctx.stroke();
+  }
+}
+
+function drawTeamBlock(ctx, game, homeShield, awayShield) {
+  const x = 55, y = 350, w = 970, h = 315;
+
+  roundRect(ctx, x, y, w, h, 28, 'rgba(8,20,27,.70)', 'rgba(231,182,61,.65)', 2);
+
+  // Escudos: objetos independentes, centrados dentro das suas áreas.
+  drawContain(ctx, homeShield, 95, y + 48, 180, 180);
+  drawContain(ctx, awayShield, 805, y + 48, 180, 180);
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#e7b63d';
+  ctx.font = '700 34px Arial';
+  ctx.fillText('VS', 540, y + 128);
+
+  ctx.fillStyle = '#f5f7f8';
+  const homeSize = fit(ctx, game.home, 480, 38, 24);
+  ctx.font = `700 ${homeSize}px Arial`;
+  wrap(ctx, game.home, 540, y + 205, 480, homeSize + 7, 2);
+
+  const awaySize = fit(ctx, game.away, 480, 38, 24);
+  ctx.font = `700 ${awaySize}px Arial`;
+  wrap(ctx, game.away, 540, y + 265, 480, awaySize + 7, 2);
+
+  ctx.textAlign = 'left';
+}
+
+function drawOfficialCard(ctx, official, x, y, w, h) {
+  roundRect(ctx, x, y, w, h, 24, 'rgba(8,20,27,.78)', 'rgba(231,182,61,.48)', 2);
+
+  const pad = 22;
+  const photoW = Math.min(245, w * 0.34);
+  const photoX = x + pad;
+  const photoY = y + pad;
+  const photoH = h - pad * 2;
+
+  // Moldura branca da fotografia — a fotografia é colocada DENTRO da caixa.
+  ctx.fillStyle = '#f5f5f0';
+  ctx.fillRect(photoX, photoY, photoW, photoH);
+
+  const photo = state.assets.get('p:' + compact(official.name)) || null;
+  if (photo) {
+    drawCover(ctx, photo, photoX + 10, photoY + 10, photoW - 20, photoH - 20, 4);
+  } else {
+    ctx.fillStyle = '#5e7078';
+    ctx.fillRect(photoX + 10, photoY + 10, photoW - 20, photoH - 20);
+  }
+
+  const textX = photoX + photoW + 35;
+  const textW = x + w - textX - 28;
+
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#e7b63d';
+  ctx.font = `700 ${Math.max(20, Math.min(29, h / 10))}px Arial`;
+  ctx.fillText(official.role.toUpperCase(), textX, y + 62);
+
+  ctx.fillStyle = '#f5f7f8';
+  const nameSize = fit(ctx, official.name, textW, h > 300 ? 50 : 38, 22);
+  ctx.font = `700 ${nameSize}px Arial`;
+  wrap(ctx, official.name, textX, y + 130, textW, nameSize + 7, 2);
+}
+
 function render(game) {
-  // ============================================================
-  // MONTAGEM FINAL — STORY 1080x1920
-  // O fundo é a BASE fornecida pelo Núcleo. Não desenhamos por cima
-  // do cabeçalho nem do logótipo que já existem nessa imagem.
-  // Esta função recebe apenas os dados já interpretados pelo PDF.
-  // ============================================================
   const canvas = document.createElement('canvas');
   canvas.width = 1080;
   canvas.height = 1920;
   const ctx = canvas.getContext('2d');
 
+  // A BASE É A IMAGEM DO NÚCLEO. Não se desenha outro logo nem se recria
+  // o cabeçalho: tudo o que já existe na base fica intacto.
   const bg = state.assets.get('background');
   if (bg) {
     ctx.drawImage(bg, 0, 0, 1080, 1920);
   } else {
-    ctx.fillStyle = '#1b2b32';
+    ctx.fillStyle = '#1d2b32';
     ctx.fillRect(0, 0, 1080, 1920);
   }
-
-  const GOLD = '#E7B63D';
-  const WHITE = '#F5F7F8';
-  const PANEL = 'rgba(12, 24, 31, 0.78)';
-  const BORDER = 'rgba(231, 182, 61, 0.55)';
-
-  const panel = (x, y, w, h, r = 28) => {
-    ctx.save();
-    ctx.fillStyle = PANEL;
-    ctx.strokeStyle = BORDER;
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.roundRect(x, y, w, h, r);
-    ctx.fill();
-    ctx.stroke();
-    ctx.restore();
-  };
-
-  // ------------------------------------------------------------
-  // TÍTULO / HASHTAG — abaixo do cabeçalho existente no fundo.
-  // ------------------------------------------------------------
-  ctx.textAlign = 'center';
-  ctx.fillStyle = GOLD;
-  ctx.font = '900 46px Arial';
-  ctx.fillText('#TambemEstamosEmJogo', 540, 205);
-
-  // ------------------------------------------------------------
-  // COMPETIÇÃO — grande e limpa.
-  // ------------------------------------------------------------
-  const competition = String(game.competition || '').trim();
-  const compSize = fit(ctx, competition, 900, 58, 30);
-  ctx.fillStyle = WHITE;
-  ctx.font = `900 ${compSize}px Arial`;
-  ctx.fillText(competition, 540, 300);
-
-  ctx.strokeStyle = GOLD;
-  ctx.lineWidth = 4;
-  ctx.beginPath();
-  ctx.moveTo(110, 330);
-  ctx.lineTo(970, 330);
-  ctx.stroke();
-
-  // ------------------------------------------------------------
-  // JOGO — escudos e equipas.
-  // ------------------------------------------------------------
-  const gameY = 370;
-  const gameH = 390;
-  panel(55, gameY, 970, gameH, 30);
 
   const homeShield = state.assets.get('s:' + compact(game.home)) || null;
   const awayShield = state.assets.get('s:' + compact(game.away)) || null;
 
-  if (homeShield) drawContain(ctx, homeShield, 80, gameY + 60, 220, 220);
-  if (awayShield) drawContain(ctx, awayShield, 780, gameY + 60, 220, 220);
-
-  const teamMax = 420;
-  const homeSize = fit(ctx, game.home, teamMax, 36, 22);
-  const awaySize = fit(ctx, game.away, teamMax, 36, 22);
-  const teamSize = Math.min(homeSize, awaySize);
-
-  ctx.fillStyle = WHITE;
-  ctx.font = `900 ${teamSize}px Arial`;
+  // Hashtag — elemento variável, sem interferir no logo do fundo.
   ctx.textAlign = 'center';
-  wrap(ctx, game.home, 540, gameY + 105, teamMax, teamSize + 7, 2);
+  ctx.fillStyle = '#f5f7f8';
+  ctx.font = '700 30px Arial';
+  ctx.fillText('#TambemEstamosEmJogo', 540, 145);
 
-  ctx.fillStyle = GOLD;
-  ctx.font = '900 44px Arial';
-  ctx.fillText('VS', 540, gameY + 205);
+  // Competição: título forte, mas com espaço reservado para múltiplas linhas.
+  ctx.fillStyle = '#e7b63d';
+  const compSize = fit(ctx, game.competition, 920, 42, 24);
+  ctx.font = `700 ${compSize}px Arial`;
+  wrap(ctx, game.competition, 540, 230, 920, compSize + 8, 3);
 
-  ctx.fillStyle = WHITE;
-  ctx.font = `900 ${teamSize}px Arial`;
-  wrap(ctx, game.away, 540, gameY + 275, teamMax, teamSize + 7, 2);
+  drawTeamBlock(ctx, game, homeShield, awayShield);
 
-  // ------------------------------------------------------------
-  // OFICIAIS — cada fotografia fica DENTRO da moldura branca.
-  // ------------------------------------------------------------
-  const officials = (game.officials || []).filter(o => o && o.name);
-  const count = officials.length;
-  const startY = 810;
-  const bottomY = 1750;
-  const gap = 22;
-  const cardH = Math.max(220, Math.floor(
-    (bottomY - startY - gap * Math.max(0, count - 1)) / Math.max(1, count)
-  ));
+  const count = game.officials.length;
 
-  officials.forEach((o, i) => {
-    const y = startY + i * (cardH + gap);
-    panel(55, y, 970, cardH, 30);
+  // A composição adapta-se ao número de pessoas. Não há sobreposição nem
+  // uma simples escrita sobre a fotografia/base.
+  if (count <= 2) {
+    const cardH = count === 1 ? 470 : 335;
+    const gap = 24;
+    const total = count * cardH + (count - 1) * gap;
+    let y = 715;
+    if (total > 1040) y = 700;
 
-    // Moldura branca da fotografia, conforme a amostra enviada.
-    const photoX = 82;
-    const photoY = y + 22;
-    const photoW = count <= 2 ? 300 : 230;
-    const photoH = cardH - 44;
-
-    ctx.fillStyle = '#F5F2E8';
-    ctx.fillRect(photoX, photoY, photoW, photoH);
-
-    const photo = state.assets.get('p:' + compact(o.name)) || null;
-    if (photo) {
-      const pad = 12;
-      drawCover(ctx, photo, photoX + pad, photoY + pad,
-        photoW - pad * 2, photoH - pad * 2, 0);
-    } else {
-      ctx.fillStyle = '#5E7078';
-      ctx.fillRect(photoX + 12, photoY + 12, photoW - 24, photoH - 24);
-      ctx.fillStyle = WHITE;
-      ctx.font = '700 18px Arial';
-      ctx.textAlign = 'center';
-      ctx.fillText('FOTOGRAFIA', photoX + photoW / 2, photoY + photoH / 2);
+    for (const official of game.officials) {
+      drawOfficialCard(ctx, official, 55, y, 970, cardH);
+      y += cardH + gap;
     }
+  } else {
+    const gap = 24;
+    const cardW = 473;
+    const cardH = count === 3 ? 360 : 330;
+    const positions = [
+      [55, 715], [552, 715],
+      [55, 715 + cardH + gap], [552, 715 + cardH + gap]
+    ];
 
-    // Informação do árbitro à direita.
-    const tx = photoX + photoW + 48;
-    const tw = 560;
-    ctx.textAlign = 'left';
-    ctx.fillStyle = GOLD;
-    const roleSize = fit(ctx, String(o.role || 'Árbitro').toUpperCase(), tw, 30, 18);
-    ctx.font = `900 ${roleSize}px Arial`;
-    ctx.fillText(String(o.role || 'Árbitro').toUpperCase(), tx, y + 78);
+    game.officials.slice(0, 4).forEach((official, i) => {
+      const [x, y] = positions[i];
+      drawOfficialCard(ctx, official, x, y, cardW, cardH);
+    });
+  }
 
-    ctx.fillStyle = WHITE;
-    const nameSize = fit(ctx, o.name, tw, count <= 2 ? 56 : 42, 24);
-    ctx.font = `900 ${nameSize}px Arial`;
-    wrap(ctx, o.name, tx, y + 160, tw, nameSize + 10, 2);
-  });
-
-  // ------------------------------------------------------------
-  // RODAPÉ — o fundo já tem a identidade visual; apenas reforçamos
-  // a mensagem, sem adicionar outro logo.
-  // ------------------------------------------------------------
+  // Rodapé limpo, sem segundo logo.
   ctx.textAlign = 'center';
-  ctx.fillStyle = WHITE;
-  ctx.font = '800 22px Arial';
-  ctx.fillText('TRABALHO, COMPETÊNCIA E DEDICAÇÃO', 540, 1815);
+  ctx.fillStyle = '#f5f7f8';
+  ctx.font = '700 24px Arial';
+  ctx.fillText('TRABALHO, COMPETÊNCIA E DEDICAÇÃO', 540, 1780);
 
-  ctx.fillStyle = GOLD;
-  ctx.font = '700 16px Arial';
-  ctx.fillText('#MARQUESBOM  •  #TambemEstamosEmJogo', 540, 1850);
+  ctx.fillStyle = '#e7b63d';
+  ctx.font = '700 17px Arial';
+  ctx.fillText('#TambemEstamosEmJogo', 540, 1820);
 
   ctx.textAlign = 'left';
   return canvas;
 }
+
 function showGames() {
   $('results').innerHTML = state.games.map(g => `
     <div class="result">
