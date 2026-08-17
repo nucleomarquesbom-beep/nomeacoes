@@ -506,82 +506,6 @@ function teamVariants(team) {
   return [...a].filter(Boolean);
 }
 
-let shieldDbPromise = null;
-
-function shieldLookupVariants(team) {
-  const raw = String(team || '').trim();
-  const withoutBusinessSuffix = raw
-    .replace(/\bSAD\b/ig, '')
-    .replace(/\bSDUQ\b/ig, '')
-    .replace(/\bOAF\b/ig, '')
-    .replace(/[,.]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-
-  const variants = [raw, withoutBusinessSuffix];
-  return [...new Set(variants.map(compact).filter(Boolean))];
-}
-
-async function loadShieldDatabase() {
-  if (!shieldDbPromise) {
-    shieldDbPromise = fetch('/escudos-db.json', { cache: 'no-store' })
-      .then(r => r.ok ? r.json() : {})
-      .catch(() => ({}));
-  }
-  return shieldDbPromise;
-}
-
-async function shieldFromDatabase(team) {
-  const db = await loadShieldDatabase();
-  const variants = shieldLookupVariants(team);
-  for (const key of variants) {
-    const entry = db?.[key];
-    if (!entry) continue;
-    const src = typeof entry === 'string' ? entry : entry.image;
-    if (!src) continue;
-    const img = await tryImage(src);
-    if (img) {
-      state.assets.set('s:' + compact(team), img);
-      state.assets.set('source:' + compact(team), typeof entry === 'object' ? (entry.source || 'Base de dados') : 'Base de dados');
-      return img;
-    }
-  }
-  return null;
-}
-
-async function shieldFromPersistentCache(team) {
-  try {
-    const variants = shieldLookupVariants(team);
-    for (const key of variants) {
-      const raw = localStorage.getItem('nafmb-shield-db:' + key);
-      if (!raw) continue;
-      const entry = JSON.parse(raw);
-      const src = entry?.imageDataUrl || entry?.image;
-      if (!src) continue;
-      const img = await tryImage(src);
-      if (img) {
-        state.assets.set('s:' + compact(team), img);
-        state.assets.set('source:' + compact(team), entry.source || 'Base de dados local');
-        return img;
-      }
-    }
-  } catch {}
-  return null;
-}
-
-function rememberShield(team, data) {
-  try {
-    const payload = JSON.stringify({
-      imageDataUrl: data?.imageDataUrl || '',
-      source: data?.source || 'Pesquisa automática',
-      updatedAt: Date.now()
-    });
-    for (const key of shieldLookupVariants(team)) {
-      try { localStorage.setItem('nafmb-shield-db:' + key, payload); } catch {}
-    }
-  } catch {}
-}
-
 async function searchRemoteShield(team, timeoutMs = 4500) {
   const key = 'remoteShield:' + compact(team);
   const cached = state.assets.get(key);
@@ -607,7 +531,6 @@ async function searchRemoteShield(team, timeoutMs = 4500) {
     state.assets.set(key, img);
     state.assets.set('s:' + compact(team), img);
     state.assets.set('source:' + compact(team), data.source || '');
-    rememberShield(team, data);
     return img;
   } catch (e) {
     if (e?.name !== 'AbortError') {
@@ -640,11 +563,7 @@ async function shieldLocalImage(team) {
 }
 
 async function prepareOneShield(team) {
-  // Ordem de prioridade: base de dados -> ficheiro local -> cache persistente -> pesquisa online.
-  // Assim, se o escudo já existir, nunca fazemos uma pesquisa desnecessária.
-  if (await shieldFromDatabase(team)) return true;
   if (await shieldLocalImage(team)) return true;
-  if (await shieldFromPersistentCache(team)) return true;
   return !!(await searchRemoteShield(team));
 }
 
@@ -795,167 +714,117 @@ function displayCompetition(competition = '') {
   return { title, detail };
 }
 
-function drawGoldLine(ctx, x1, y, x2, thickness = 2) {
-  ctx.save();
+function drawGoldLine(ctx, x1, y, x2) {
   ctx.strokeStyle = '#e7b63d';
-  ctx.lineWidth = thickness;
+  ctx.lineWidth = 2;
   ctx.beginPath();
   ctx.moveTo(x1, y);
   ctx.lineTo(x2, y);
   ctx.stroke();
   ctx.fillStyle = '#e7b63d';
-  ctx.fillRect((x1 + x2) / 2 - 22, y - 4, 44, 8);
-  ctx.restore();
+  ctx.fillRect((x1 + x2) / 2 - 24, y - 4, 48, 8);
 }
 
-function drawMixedTitle(ctx, text, x, y, maxWidth, startSize = 110) {
-  const match = String(text).match(/^(.*?)(\d+)$/);
-  if (!match) {
-    ctx.fillStyle = '#f5f7f8';
-    const size = fit(ctx, text, maxWidth, startSize, 54);
-    ctx.font = `900 ${size}px Impact, Arial Black, Arial`;
-    ctx.fillText(text, x, y);
-    return;
-  }
+function drawTeamBlock(ctx, game, homeShield, awayShield) {
+  // Keep the two team areas completely separated from the central VS line.
+  const y = 505;
+  const leftCenter = 245;
+  const rightCenter = 835;
 
-  const left = match[1].trimEnd();
-  const number = match[2];
-  let size = startSize;
-  while (size > 54) {
-    ctx.font = `900 ${size}px Impact, Arial Black, Arial`;
-    const total = ctx.measureText(left).width + ctx.measureText(number).width + 12;
-    if (total <= maxWidth) break;
-    size -= 2;
-  }
-
-  ctx.font = `900 ${size}px Impact, Arial Black, Arial`;
-  const lw = ctx.measureText(left).width;
-  const nw = ctx.measureText(number).width;
-  const total = lw + nw + 12;
-  const sx = x - total / 2;
-
-  ctx.textAlign = 'left';
-  ctx.fillStyle = '#f5f7f8';
-  ctx.fillText(left, sx, y);
+  ctx.textAlign = 'center';
   ctx.fillStyle = '#e7b63d';
-  ctx.fillText(number, sx + lw + 12, y);
-  ctx.textAlign = 'center';
-}
-
-function drawHashtag(ctx) {
-  // Deliberately separated into three parts so it never collides with itself.
-  const y = 178;
-  ctx.textAlign = 'center';
-  ctx.font = '900 italic 52px Arial';
-  const parts = [
-    { text: '#TambemEstamos', color: '#f5f7f8' },
-    { text: 'EmJogo', color: '#e7b63d' }
-  ];
-  const widths = parts.map(p => ctx.measureText(p.text).width);
-  const gap = 8;
-  const total = widths.reduce((a,b)=>a+b,0) + gap;
-  let x = 540 - total/2;
-  ctx.textAlign = 'left';
-  parts.forEach((p, i) => {
-    ctx.fillStyle = p.color;
-    ctx.fillText(p.text, x, y);
-    x += widths[i] + gap;
-  });
-  ctx.textAlign = 'center';
-}
-
-function drawTeamBlock(ctx, game, homeShield, awayShield, y = 470) {
-  const leftCenter = 270;
-  const rightCenter = 810;
-  const shieldY = y + 5;
-  const shieldSize = 155;
-
-  ctx.textAlign = 'center';
-  drawContain(ctx, homeShield, leftCenter - shieldSize/2, shieldY, shieldSize, shieldSize);
-  drawContain(ctx, awayShield, rightCenter - shieldSize/2, shieldY, shieldSize, shieldSize);
-
-  // Central VS area gives the shields and team names visual breathing room.
-  ctx.strokeStyle = 'rgba(231,182,61,.72)';
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.moveTo(385, y + 18); ctx.lineTo(385, y + 250);
-  ctx.moveTo(695, y + 18); ctx.lineTo(695, y + 250);
-  ctx.stroke();
-
-  ctx.fillStyle = '#e7b63d';
-  ctx.font = '900 62px Impact, Arial Black, Arial';
+  ctx.font = '900 68px Arial';
   ctx.fillText('VS', 540, y + 145);
 
-  ctx.fillStyle = '#f5f7f8';
-  const homeSize = fit(ctx, game.home, 315, 31, 20);
-  ctx.font = `800 ${homeSize}px Arial`;
-  wrap(ctx, game.home.toUpperCase(), leftCenter, y + 205, 330, homeSize + 6, 2);
+  ctx.strokeStyle = 'rgba(231,182,61,.82)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(385, y + 25); ctx.lineTo(385, y + 265);
+  ctx.moveTo(695, y + 25); ctx.lineTo(695, y + 265);
+  ctx.stroke();
 
-  const awaySize = fit(ctx, game.away, 315, 31, 20);
-  ctx.font = `800 ${awaySize}px Arial`;
-  wrap(ctx, game.away.toUpperCase(), rightCenter, y + 205, 330, awaySize + 6, 2);
+  drawContain(ctx, homeShield, 120, y + 0, 250, 175);
+  drawContain(ctx, awayShield, 710, y + 0, 250, 175);
+
+  // Team names are kept inside their own columns so they can never cross
+  // the central separators.
+  ctx.fillStyle = '#f5f7f8';
+  const homeSize = fit(ctx, game.home, 275, 31, 20);
+  ctx.font = `700 ${homeSize}px Arial`;
+  wrap(ctx, game.home, leftCenter, y + 205, 275, homeSize + 7, 2);
+
+  const awaySize = fit(ctx, game.away, 275, 31, 20);
+  ctx.font = `700 ${awaySize}px Arial`;
+  wrap(ctx, game.away, rightCenter, y + 205, 275, awaySize + 7, 2);
 }
 
-function drawMatchInfo(ctx, game, y = 760) {
+function drawMatchInfo(ctx, game) {
   const date = game.date || game.matchDate || '';
   const time = game.time || game.matchTime || '';
   const venue = game.venue || game.stadium || '';
-  if (!date && !time && !venue) return false;
+  if (!date && !time && !venue) return;
 
-  drawGoldLine(ctx, 125, y, 955, 2);
-  ctx.textAlign = 'center';
+  drawGoldLine(ctx, 115, 800, 965);
+  ctx.textAlign = 'left';
   ctx.fillStyle = '#f5f7f8';
   ctx.font = '700 25px Arial';
 
-  if (date) ctx.fillText('▣  ' + date, 250, y + 52);
-  if (time) ctx.fillText('◷  ' + time, 535, y + 52);
+  if (date) ctx.fillText('▣  ' + date, 130, 850);
+  if (time) ctx.fillText('◷  ' + time, 430, 850);
   if (venue) {
     ctx.font = '700 22px Arial';
-    wrap(ctx, '◉  ' + venue, 760, y + 35, 330, 27, 2);
+    wrap(ctx, '◉  ' + venue, 650, 840, 300, 28, 2);
   }
-  return true;
 }
 
 function drawOfficialCard(ctx, official, x, y, w, h) {
-  // A compact, editorial card: large enough for the photo, but never so tall
-  // that four officials destroy the Story composition.
-  roundRect(ctx, x, y, w, h, 24, 'rgba(7,20,27,.76)', 'rgba(231,182,61,.80)', 2);
+  // New visual treatment: no dark card and no strip over the photograph.
+  // The referee photo is a straight Polaroid-style print, with the
+  // function/name information aligned cleanly to its right.
+  const photoW = Math.min(245, h * 0.82);
+  const photoH = Math.min(h - 20, photoW * 1.18);
+  const photoX = x + 18;
+  const photoY = y + (h - photoH) / 2;
+  const frame = 12;
 
-  const pad = Math.max(14, Math.min(22, h * 0.10));
-  const photoSize = Math.min(h - pad*2, 205);
-  const photoX = x + pad;
-  const photoY = y + (h - photoSize) / 2;
-
-  // White photographic frame.
-  ctx.fillStyle = '#f4f4ef';
-  ctx.fillRect(photoX, photoY, photoSize, photoSize);
+  ctx.save();
+  ctx.shadowColor = 'rgba(0,0,0,.30)';
+  ctx.shadowBlur = 14;
+  ctx.shadowOffsetY = 6;
+  ctx.fillStyle = '#f4f1e9';
+  ctx.fillRect(photoX, photoY, photoW, photoH);
+  ctx.restore();
 
   const photo = state.assets.get('p:' + compact(official.name)) || null;
   if (photo) {
-    drawCover(ctx, photo, photoX + 9, photoY + 9, photoSize - 18, photoSize - 18, 3);
+    drawCover(ctx, photo, photoX + frame, photoY + frame, photoW - frame * 2, photoH - frame * 2, 0);
   } else {
-    ctx.fillStyle = '#52646d';
-    ctx.fillRect(photoX + 9, photoY + 9, photoSize - 18, photoSize - 18);
+    ctx.fillStyle = '#596b73';
+    ctx.fillRect(photoX + frame, photoY + frame, photoW - frame * 2, photoH - frame * 2);
   }
 
-  const textX = photoX + photoSize + 42;
-  const textW = x + w - textX - 28;
-  const compactCard = h < 235;
+  const textX = photoX + photoW + 55;
+  const textW = x + w - textX - 25;
 
   ctx.textAlign = 'left';
   ctx.fillStyle = '#e7b63d';
-  ctx.font = `800 ${compactCard ? 22 : 27}px Arial`;
-  ctx.fillText(official.role.toUpperCase(), textX, y + h * 0.34);
+  ctx.font = `700 ${Math.max(22, Math.min(34, h * 0.12))}px Arial`;
+  ctx.fillText(official.role.toUpperCase(), textX, y + h * 0.30);
 
   ctx.fillStyle = '#f5f7f8';
-  const nameStart = compactCard ? 39 : 48;
-  const nameSize = fit(ctx, official.name.toUpperCase(), textW, nameStart, compactCard ? 25 : 28);
+  const nameSize = fit(
+    ctx,
+    official.name.toUpperCase(),
+    textW,
+    Math.max(34, Math.min(62, h * 0.22)),
+    22
+  );
   ctx.font = `900 ${nameSize}px Arial`;
-  wrap(ctx, official.name.toUpperCase(), textX, y + h * 0.59, textW, nameSize + 4, 2);
+  wrap(ctx, official.name.toUpperCase(), textX, y + h * 0.54, textW, nameSize + 6, 2);
 
   ctx.fillStyle = '#e7b63d';
-  ctx.font = `800 ${compactCard ? 19 : 23}px Arial`;
-  ctx.fillText('A.F. COIMBRA', textX, y + h * 0.82);
+  ctx.font = `700 ${Math.max(20, Math.min(29, h * 0.10))}px Arial`;
+  ctx.fillText('A.F. COIMBRA', textX, y + h * 0.78);
 }
 
 function render(game) {
@@ -965,10 +834,8 @@ function render(game) {
   const ctx = canvas.getContext('2d');
 
   const bg = state.assets.get('background');
-  if (bg) {
-    // The approved base is already 9:16. Never stretch a second copy of it.
-    ctx.drawImage(bg, 0, 0, 1080, 1920);
-  } else {
+  if (bg) ctx.drawImage(bg, 0, 0, 1080, 1920);
+  else {
     ctx.fillStyle = '#10222b';
     ctx.fillRect(0, 0, 1080, 1920);
   }
@@ -976,45 +843,69 @@ function render(game) {
   const homeShield = state.assets.get('s:' + compact(game.home)) || null;
   const awayShield = state.assets.get('s:' + compact(game.away)) || null;
 
-  // The background already contains the original Núcleo logo/header.
-  drawHashtag(ctx);
+  // The background already contains the original header and logo.
+  // Keep the hashtag below the header so it can never collide with the logo.
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#f5f7f8';
+  ctx.font = '900 italic 52px Arial';
+  ctx.fillText('#TambemEstamos', 455, 155);
+  ctx.fillStyle = '#e7b63d';
+  ctx.font = '900 italic 52px Arial';
+  ctx.fillText('EmJogo', 685, 155);
 
   const comp = displayCompetition(game.competition);
-  ctx.textAlign = 'center';
   ctx.fillStyle = '#e7b63d';
-  ctx.font = '800 24px Arial';
-  ctx.fillText('COMPETIÇÃO', 540, 245);
+  ctx.font = '700 23px Arial';
+  ctx.fillText('COMPETIÇÃO', 540, 225);
 
-  drawMixedTitle(ctx, comp.title, 540, 350, 900, 112);
-  drawGoldLine(ctx, 300, 400, 780, 2);
+  // Draw the competition title as one centred unit, colouring only the final
+  // numeric part gold. This prevents the previous duplicated/offset title.
+  const titleY = 315;
+  const match = comp.title.match(/^(.*?)(\d+)$/);
+  if (match) {
+    const left = match[1].trimEnd();
+    const num = match[2];
+    ctx.font = '900 112px Arial';
+    const gap = 10;
+    const totalW = ctx.measureText(left).width + gap + ctx.measureText(num).width;
+    let tx = 540 - totalW / 2;
+    ctx.fillStyle = '#f5f7f8';
+    ctx.fillText(left, tx + ctx.measureText(left).width / 2, titleY);
+    tx += ctx.measureText(left).width + gap;
+    ctx.fillStyle = '#e7b63d';
+    ctx.fillText(num, tx + ctx.measureText(num).width / 2, titleY);
+  } else {
+    ctx.fillStyle = '#f5f7f8';
+    const titleSize = fit(ctx, comp.title, 860, 108, 54);
+    ctx.font = `900 ${titleSize}px Arial`;
+    ctx.fillText(comp.title, 540, titleY);
+  }
 
+  drawGoldLine(ctx, 300, 365, 780);
   ctx.fillStyle = '#f5f7f8';
-  const detail = comp.detail || game.competition || '';
-  const detailSize = fit(ctx, detail, 900, 27, 17);
-  ctx.font = `800 ${detailSize}px Arial`;
-  ctx.fillText(detail.toUpperCase(), 540, 447);
+  ctx.font = `700 ${fit(ctx, comp.detail || game.competition, 900, 25, 16)}px Arial`;
+  ctx.fillText(comp.detail || '', 540, 415);
 
-  // Teams are deliberately isolated from the referee cards.
-  drawTeamBlock(ctx, game, homeShield, awayShield, 485);
-
-  const hasMatchInfo = drawMatchInfo(ctx, game, 755);
+  drawTeamBlock(ctx, game, homeShield, awayShield);
+  drawMatchInfo(ctx, game);
 
   const count = Math.max(1, Math.min(game.officials.length, 4));
-  const footerTop = 1780;
-  const start = hasMatchInfo ? 845 : 820;
-  const gap = count >= 4 ? 12 : 16;
-  const available = footerTop - start;
-  const cardH = Math.floor((available - gap * (count - 1)) / count);
+  let top = (game.date || game.matchDate || game.time || game.matchTime || game.venue || game.stadium) ? 865 : 815;
+  const bottom = 1765;
+  const gap = count >= 4 ? 10 : 16;
+  const cardH = Math.floor((bottom - top - gap * (count - 1)) / count);
+  const cardX = 95;
+  const cardW = 890;
 
   game.officials.slice(0, 4).forEach((official, i) => {
-    drawOfficialCard(ctx, official, 105, start + i * (cardH + gap), 870, cardH);
+    drawOfficialCard(ctx, official, cardX, top + i * (cardH + gap), cardW, cardH);
   });
 
-  drawGoldLine(ctx, 130, 1820, 950, 2);
+  drawGoldLine(ctx, 130, 1810, 950);
   ctx.textAlign = 'center';
   ctx.fillStyle = '#f5f7f8';
-  ctx.font = '800 23px Arial';
-  ctx.fillText('TRABALHO  •  COMPETÊNCIA  •  DEDICAÇÃO', 540, 1868);
+  ctx.font = '700 23px Arial';
+  ctx.fillText('TRABALHO  •  COMPETÊNCIA  •  DEDICAÇÃO', 540, 1860);
 
   return canvas;
 }
