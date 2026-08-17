@@ -660,6 +660,7 @@ function teamVariants(team) {
     team.trim(),
 
     team
+      .replace(/\s*\/\s*OAF\b/ig, '')
       .replace(/\bSAD\b/ig, '')
       .replace(/\bSDUQ\b/ig, '')
       .trim(),
