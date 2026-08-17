@@ -887,13 +887,29 @@ function render(game) {
 
   // The background already contains the original header and logo.
   // Keep the hashtag below the header so it can never collide with the logo.
-  ctx.textAlign = 'center';
+    // #TambemEstamosEmJogo
+  // Calcula a largura real de cada parte para que nunca haja sobreposição.
+  ctx.font = '900 italic 52px Arial';
+
+  const hashtag1 = '#TambemEstamos';
+  const hashtag2 = 'EmJogo';
+  const hashtagGap = 12;
+
+  const hashtagW1 = ctx.measureText(hashtag1).width;
+  const hashtagW2 = ctx.measureText(hashtag2).width;
+  const hashtagTotalW = hashtagW1 + hashtagGap + hashtagW2;
+
+  let hashtagX = 540 - hashtagTotalW / 2;
+
+  ctx.textAlign = 'left';
+
   ctx.fillStyle = '#f5f7f8';
-  ctx.font = '900 italic 52px Arial';
-  ctx.fillText('#TambemEstamos', 455, 155);
+  ctx.fillText(hashtag1, hashtagX, 155);
+
+  hashtagX += hashtagW1 + hashtagGap;
+
   ctx.fillStyle = '#e7b63d';
-  ctx.font = '900 italic 52px Arial';
-  ctx.fillText('EmJogo', 685, 155);
+  ctx.fillText(hashtag2, hashtagX, 155);
 
   const comp = displayCompetition(game.competition);
   ctx.fillStyle = '#e7b63d';
