@@ -5,7 +5,17 @@ import JSZip from 'jszip';
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
 
 const $ = id => document.getElementById(id);
-const state = { pages: [], games: [], names: new Map(), assets: new Map() };
+
+const state = {
+  pages: [],
+  games: [],
+  names: new Map(),
+  assets: new Map()
+};
+
+/* =========================================================
+   TEXTO / NORMALIZAÇÃO
+   ========================================================= */
 
 function normalizeText(v = '') {
   return String(v).toLowerCase()
@@ -30,7 +40,11 @@ function safeFile(v = '') {
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;'
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#039;'
   }[c]));
 }
 
@@ -44,15 +58,11 @@ function setError(s) {
   $('status').textContent = '';
 }
 
-/*
- * PESQUISA DE NOMES
- *
- * Esta é a lógica importante:
- * - a lista do utilizador é guardada com o nome original;
- * - o PDF é pesquisado como texto normalizado;
- * - os espaços e acentos deixam de impedir a correspondência;
- * - a pesquisa é feita no texto da própria linha, não nas coordenadas X.
- */
+
+/* =========================================================
+   PESQUISA DE NOMES
+   ========================================================= */
+
 function findListedName(text) {
   const normalized = normalizeText(text);
   const compactText = compact(text);
@@ -61,7 +71,10 @@ function findListedName(text) {
     .sort((a, b) => b[0].length - a[0].length);
 
   for (const [key, original] of entries) {
-    if (normalized.includes(normalizeText(original)) || compactText.includes(key)) {
+    if (
+      normalized.includes(normalizeText(original)) ||
+      compactText.includes(key)
+    ) {
       return original;
     }
   }
@@ -89,6 +102,7 @@ function findListedInText(text) {
     }
 
     const cpos = compactText.indexOf(key);
+
     if (cpos >= 0) {
       return {
         name: original,
@@ -100,6 +114,11 @@ function findListedInText(text) {
 
   return null;
 }
+
+
+/* =========================================================
+   IDENTIFICAÇÃO DAS LINHAS DO PDF
+   ========================================================= */
 
 function isObserver(t) {
   return /^OBSV\s*:/i.test(t.trim());
@@ -119,7 +138,10 @@ function isMeta(t) {
 
 function isCompetition(t) {
   const n = normalizeText(t);
-  if (!n || isHeader(t) || isObserver(t) || isVAR(t) || isMeta(t)) return false;
+
+  if (!n || isHeader(t) || isObserver(t) || isVAR(t) || isMeta(t)) {
+    return false;
+  }
 
   return /\b(liga|campeonato|taca|supertaca|sub-\d+|futsal|futebol de praia)\b/i.test(n)
     && !/\bA\.?\s*F\.?\b/i.test(t);
@@ -127,14 +149,21 @@ function isCompetition(t) {
 
 function detectModality(c = '') {
   const n = normalizeText(c);
-  if (n.includes('futsal') || n.includes('liga placard') || n.includes('liga feminina placard')) {
+
+  if (
+    n.includes('futsal') ||
+    n.includes('liga placard') ||
+    n.includes('liga feminina placard')
+  ) {
     return 'FUTSAL';
   }
+
   return 'FUTEBOL';
 }
 
 function isLiga3BPI(c = '') {
   const n = normalizeText(c);
+
   return n.includes('liga 3') || n.includes('liga bpi');
 }
 
@@ -142,12 +171,6 @@ function hasAssociation(t) {
   return /\bA\.?\s*F\.?\s+/i.test(t);
 }
 
-/*
- * Retira a parte da associação e deixa apenas:
- *   equipa 1 - equipa 2 + nome do oficial
- *
- * O nome do oficial é encontrado pela lista do utilizador.
- */
 function removeAssociation(t) {
   return t.replace(/\s+A\.?\s*F\.?\s+.*$/i, '').trim();
 }
@@ -172,12 +195,18 @@ function splitGamePrefix(prefix) {
   };
 }
 
+
+/* =========================================================
+   FUNÇÃO DOS OFICIAIS
+   ========================================================= */
+
 function roleForPosition(index, competition, modality) {
   if (modality === 'FUTSAL') {
     if (index === 0) return 'Árbitro';
     if (index === 1) return '2.º Árbitro';
     if (index === 2) return '3.º Árbitro';
     if (index === 3) return 'Cronometrista';
+
     return 'Oficial';
   }
 
@@ -186,12 +215,14 @@ function roleForPosition(index, competition, modality) {
     if (index === 1) return '4.º Árbitro';
     if (index === 2) return 'Assistente 1';
     if (index === 3) return 'Assistente 2';
+
     return 'Oficial';
   }
 
   if (index === 0) return 'Árbitro';
   if (index === 1) return 'Assistente 1';
   if (index === 2) return 'Assistente 2';
+
   return 'Oficial';
 }
 
@@ -202,9 +233,13 @@ function finalizeGame(current) {
 
   const officials = current.officials
     .filter(o => o.name)
-    .map((o, index) => ({
+    .map(o => ({
       name: o.name,
-      role: roleForPosition(o.position, current.competition, modality)
+      role: roleForPosition(
+        o.position,
+        current.competition,
+        modality
+      )
     }));
 
   if (current.observer) {
@@ -225,37 +260,47 @@ function finalizeGame(current) {
   };
 }
 
-/*
- * NOVO LEITOR:
- * não usa coordenadas X para descobrir quem é o árbitro.
- *
- * Cada linha é tratada como texto.
- * A existência de "A.F." identifica uma linha de nomeação.
- * A lista do utilizador identifica quais nomes nos interessam.
- *
- * Isto permite, por exemplo:
- *
- * LUSITANO ... - ATLÉTICO ... GONCALO ROSA A.F. COIMBRA
- * NUNO GUERRA A.F. COIMBRA
- *
- * mesmo que apenas Nuno Guerra esteja na lista.
- * O primeiro continua a ocupar a posição 0 e Nuno a posição 1,
- * logo Nuno = 4.º Árbitro.
- */
+
+/* =========================================================
+   CABEÇALHOS / COLUNAS DO PDF
+   ========================================================= */
+
 function headerAnchors(items) {
-  const a = { game: null, official: null, assoc: null };
+  const a = {
+    game: null,
+    official: null,
+    assoc: null
+  };
+
   for (const it of items) {
     const n = normalizeText(it.text);
-    if (n === 'jogo') a.game = it.x;
-    else if (n === 'arbitro') a.official = it.x;
-    else if (n === 'associacao') a.assoc = it.x;
+
+    if (n === 'jogo') {
+      a.game = it.x;
+    } else if (n === 'arbitro') {
+      a.official = it.x;
+    } else if (n === 'associacao') {
+      a.assoc = it.x;
+    }
   }
+
   return a;
 }
 
 function columnText(line, anchors) {
-  const out = { game: [], official: [], assoc: [] };
-  if (anchors.game == null || anchors.official == null || anchors.assoc == null) return out;
+  const out = {
+    game: [],
+    official: [],
+    assoc: []
+  };
+
+  if (
+    anchors.game == null ||
+    anchors.official == null ||
+    anchors.assoc == null
+  ) {
+    return out;
+  }
 
   for (const it of line.items) {
     const candidates = [
@@ -263,8 +308,10 @@ function columnText(line, anchors) {
       ['official', Math.abs(it.x - anchors.official)],
       ['assoc', Math.abs(it.x - anchors.assoc)]
     ].sort((a, b) => a[1] - b[1]);
+
     out[candidates[0][0]].push(it.text);
   }
+
   return {
     game: out.game.join(' ').replace(/\s+/g, ' ').trim(),
     official: out.official.join(' ').replace(/\s+/g, ' ').trim(),
@@ -272,8 +319,14 @@ function columnText(line, anchors) {
   };
 }
 
+
+/* =========================================================
+   PARSER DO PDF
+   ========================================================= */
+
 function parsePage(page) {
   const games = [];
+
   let competition = '';
   let current = null;
   let table = false;
@@ -281,48 +334,69 @@ function parsePage(page) {
 
   function pushCurrent() {
     const game = finalizeGame(current);
-    if (game) games.push(game);
+
+    if (game) {
+      games.push(game);
+    }
+
     current = null;
   }
 
   for (let i = 0; i < page.lines.length; i++) {
     const line = page.lines[i];
     const text = line.text.trim();
+
     if (!text) continue;
 
     if (isHeader(text)) {
       pushCurrent();
+
       anchors = headerAnchors(line.items);
       table = true;
+
       continue;
     }
 
     if (!table) {
-      if (isCompetition(text)) competition = text;
+      if (isCompetition(text)) {
+        competition = text;
+      }
+
       continue;
     }
 
     if (isMeta(text)) {
       pushCurrent();
+
       table = false;
       anchors = null;
+
       continue;
     }
 
     if (isCompetition(text) && !hasAssociation(text)) {
       pushCurrent();
+
       competition = text;
       table = false;
       anchors = null;
+
       continue;
     }
 
     if (isObserver(text)) {
       if (current) {
-        const observerText = text.replace(/^OBSV\s*:/i, '').trim();
+        const observerText = text
+          .replace(/^OBSV\s*:/i, '')
+          .trim();
+
         const listed = findListedName(observerText);
-        if (listed) current.observer = listed;
+
+        if (listed) {
+          current.observer = listed;
+        }
       }
+
       continue;
     }
 
@@ -330,36 +404,60 @@ function parsePage(page) {
     if (!hasAssociation(text)) continue;
 
     const cols = columnText(line, anchors);
+
     const assoc = cols.assoc || '';
     const official = cols.official || '';
     const gameText = cols.game || '';
 
-    // FPF's table has a fixed semantic boundary: the game is under "Jogo",
-    // the referee under "Árbitro", and the association under "Associação".
-    // This is much safer than trying to guess where a team name ends from
-    // the concatenated text string.
-    if (gameText.includes(' - ') && official && /^A\.?\s*F\.?/i.test(assoc)) {
+    /*
+     * PRIMEIRA LINHA DO JOGO
+     */
+    if (
+      gameText.includes(' - ') &&
+      official &&
+      /^A\.?\s*F\.?/i.test(assoc)
+    ) {
       pushCurrent();
 
       const dash = gameText.lastIndexOf(' - ');
-      const home = gameText.slice(0, dash).trim();
-      const away = gameText.slice(dash + 3).trim();
+
+      const home = gameText
+        .slice(0, dash)
+        .trim();
+
+      const away = gameText
+        .slice(dash + 3)
+        .trim();
+
       const listed = findListedName(official);
 
       current = {
         competition,
         home,
         away,
-        officials: [{ name: listed || null, position: 0 }],
+        officials: [
+          {
+            name: listed || null,
+            position: 0
+          }
+        ],
         observer: null,
         page: page.page
       };
+
       continue;
     }
 
-    // Continuation lines contain only the official + association columns.
-    if (official && /^A\.?\s*F\.?/i.test(assoc) && current) {
+    /*
+     * LINHAS SEGUINTES DO MESMO JOGO
+     */
+    if (
+      official &&
+      /^A\.?\s*F\.?/i.test(assoc) &&
+      current
+    ) {
       const listed = findListedName(official);
+
       current.officials.push({
         name: listed || null,
         position: current.officials.length
@@ -368,6 +466,7 @@ function parsePage(page) {
   }
 
   pushCurrent();
+
   return games;
 }
 
@@ -375,13 +474,23 @@ function parsePages(pages) {
   return pages.flatMap(parsePage);
 }
 
+
+/* =========================================================
+   EXTRAÇÃO DO PDF
+   ========================================================= */
+
 async function extractPDF(file) {
   const data = await file.arrayBuffer();
-  const pdf = await pdfjsLib.getDocument({ data }).promise;
+
+  const pdf = await pdfjsLib
+    .getDocument({ data })
+    .promise;
+
   const pages = [];
 
   for (let p = 1; p <= pdf.numPages; p++) {
     const page = await pdf.getPage(p);
+
     const content = await page.getTextContent({
       normalizeWhitespace: true,
       disableCombineTextItems: true
@@ -396,16 +505,24 @@ async function extractPDF(file) {
         width: i.width || 0
       }));
 
-    items.sort((a, b) => b.y - a.y || a.x - b.x);
+    items.sort(
+      (a, b) => b.y - a.y || a.x - b.x
+    );
 
     const groups = [];
     const tol = 3.5;
 
     for (const it of items) {
-      let g = groups.find(x => Math.abs(x.y - it.y) <= tol);
+      let g = groups.find(
+        x => Math.abs(x.y - it.y) <= tol
+      );
 
       if (!g) {
-        g = { y: it.y, items: [] };
+        g = {
+          y: it.y,
+          items: []
+        };
+
         groups.push(g);
       }
 
@@ -418,13 +535,21 @@ async function extractPDF(file) {
         g.items.sort((a, b) => a.x - b.x);
 
         return {
-          text: g.items.map(i => i.text).join(' ').replace(/\s+/g, ' ').trim(),
+          text: g.items
+            .map(i => i.text)
+            .join(' ')
+            .replace(/\s+/g, ' ')
+            .trim(),
+
           items: g.items
         };
       })
       .filter(x => x.text);
 
-    pages.push({ page: p, lines });
+    pages.push({
+      page: p,
+      lines
+    });
   }
 
   return {
@@ -433,12 +558,20 @@ async function extractPDF(file) {
   };
 }
 
+
+/* =========================================================
+   IMAGENS
+   ========================================================= */
+
 function tryImage(url) {
   return new Promise(resolve => {
     const img = new Image();
+
     img.crossOrigin = 'anonymous';
+
     img.onload = () => resolve(img);
     img.onerror = () => resolve(null);
+
     img.src = url;
   });
 }
@@ -468,21 +601,39 @@ async function loadIdentity() {
   ]);
 }
 
+
+/* =========================================================
+   FOTOGRAFIAS DOS ÁRBITROS
+   ========================================================= */
+
 function personUrls(name) {
   const base = safeFile(name);
+
   const variants = [...new Set([
     base,
     base.toLowerCase(),
     base.toUpperCase(),
-    base.replace(/\b\w/g, c => c.toUpperCase())
+    base.replace(
+      /\b\w/g,
+      c => c.toUpperCase()
+    )
   ])];
 
   const urls = [];
+
   for (const f of variants) {
-    for (const ext of ['jpg', 'jpeg', 'png', 'webp']) {
-      urls.push(`/fotografias/${encodeURIComponent(f)}.${ext}`);
+    for (const ext of [
+      'jpg',
+      'jpeg',
+      'png',
+      'webp'
+    ]) {
+      urls.push(
+        `/fotografias/${encodeURIComponent(f)}.${ext}`
+      );
     }
   }
+
   return urls;
 }
 
@@ -493,106 +644,294 @@ async function personImage(name) {
     return state.assets.get(key);
   }
 
-  return loadFirst(key, personUrls(name));
+  return loadFirst(
+    key,
+    personUrls(name)
+  );
 }
+
+
+/* =========================================================
+   ESCUDOS
+   ========================================================= */
 
 function teamVariants(team) {
   const a = new Set([
     team.trim(),
-    team.replace(/\bSAD\b/ig, '').replace(/\bSDUQ\b/ig, '').trim(),
-    team.replace(/[,.]/g, '').trim()
+
+    team
+      .replace(/\bSAD\b/ig, '')
+      .replace(/\bSDUQ\b/ig, '')
+      .trim(),
+
+    team
+      .replace(/[,.]/g, '')
+      .trim()
   ]);
 
   return [...a].filter(Boolean);
 }
 
-async function searchRemoteShield(team, timeoutMs = 4500) {
+
+/*
+ * PESQUISA ONLINE
+ *
+ * Esta função só é chamada depois de terminar
+ * a pesquisa LOCAL de todos os clubes.
+ */
+async function searchRemoteShield(
+  team,
+  timeoutMs = 4500
+) {
   const key = 'remoteShield:' + compact(team);
+
   const cached = state.assets.get(key);
-  if (cached) return cached;
+
+  if (cached) {
+    return cached;
+  }
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  const timer = setTimeout(
+    () => controller.abort(),
+    timeoutMs
+  );
 
   try {
-    const r = await fetch(`/api/escudo?team=${encodeURIComponent(team)}`, {
-      headers: { 'Accept': 'application/json' },
-      signal: controller.signal
-    });
-    if (!r.ok) return null;
+    const r = await fetch(
+      `/api/escudo?team=${encodeURIComponent(team)}`,
+      {
+        headers: {
+          'Accept': 'application/json'
+        },
+        signal: controller.signal
+      }
+    );
+
+    if (!r.ok) {
+      return null;
+    }
 
     const data = await r.json();
+
     const imageSrc = data?.imageDataUrl;
-    if (!imageSrc) return null;
+
+    if (!imageSrc) {
+      return null;
+    }
 
     const img = await tryImage(imageSrc);
-    if (!img) return null;
+
+    if (!img) {
+      return null;
+    }
 
     state.assets.set(key, img);
-    state.assets.set('s:' + compact(team), img);
-    state.assets.set('source:' + compact(team), data.source || '');
+
+    state.assets.set(
+      's:' + compact(team),
+      img
+    );
+
+    state.assets.set(
+      'source:' + compact(team),
+      data.source || ''
+    );
+
     return img;
+
   } catch (e) {
     if (e?.name !== 'AbortError') {
-      console.warn('Pesquisa automática de escudo falhou:', team, e);
+      console.warn(
+        'Pesquisa automática de escudo falhou:',
+        team,
+        e
+      );
     }
+
     return null;
+
   } finally {
     clearTimeout(timer);
   }
 }
 
+
+/*
+ * PESQUISA LOCAL
+ *
+ * IMPORTANTE:
+ * Esta função é executada para TODOS os clubes
+ * antes de qualquer pesquisa online.
+ */
 async function shieldLocalImage(team) {
   const key = 's:' + compact(team);
-  if (state.assets.has(key)) return state.assets.get(key);
+
+  if (state.assets.has(key)) {
+    return state.assets.get(key);
+  }
 
   for (const v of teamVariants(team)) {
     const f = safeFile(v);
-    // The normal repository convention is PNG first. This avoids four
-    // unnecessary failed requests for the common case.
-    for (const ext of ['png', 'jpg', 'jpeg', 'webp']) {
-      const img = await tryImage(`/escudos/${f}.${ext}?v=5`);
+
+    /*
+     * PNG primeiro porque é o formato habitual.
+     */
+    for (const ext of [
+      'png',
+      'jpg',
+      'jpeg',
+      'webp'
+    ]) {
+      const img = await tryImage(
+        `/escudos/${f}.${ext}?v=5`
+      );
+
       if (img) {
         state.assets.set(key, img);
-        state.assets.set('source:' + compact(team), 'Biblioteca local do Núcleo');
+
+        state.assets.set(
+          'source:' + compact(team),
+          'Biblioteca local do Núcleo'
+        );
+
         return img;
       }
     }
   }
+
   return null;
 }
 
-async function prepareOneShield(team) {
-  if (await shieldLocalImage(team)) return true;
-  return !!(await searchRemoteShield(team));
+
+/*
+ * FASE 1:
+ * Apenas pesquisa local.
+ */
+async function prepareOneShieldLocal(team) {
+  return !!(await shieldLocalImage(team));
 }
 
+
+/*
+ * PREFETCH DOS ESCUDOS
+ *
+ * ORDEM OBRIGATÓRIA:
+ *
+ * 1. Procurar TODOS localmente.
+ * 2. Identificar os que faltam.
+ * 3. Só depois pesquisar online os que faltam.
+ */
 async function prefetchShields(games) {
   const teams = new Map();
+
   for (const g of games) {
-    teams.set(compact(g.home), g.home);
-    teams.set(compact(g.away), g.away);
+    teams.set(
+      compact(g.home),
+      g.home
+    );
+
+    teams.set(
+      compact(g.away),
+      g.away
+    );
   }
 
   const uniqueTeams = [...teams.values()];
   const started = performance.now();
 
-  // All teams in parallel. No sequential club-by-club wait.
-  await Promise.all(uniqueTeams.map(team => prepareOneShield(team)));
+  /*
+   * ======================================================
+   * FASE 1 — TODOS OS ESCUDOS LOCAIS
+   * ======================================================
+   */
+
+  await Promise.all(
+    uniqueTeams.map(team =>
+      prepareOneShieldLocal(team)
+    )
+  );
+
+  /*
+   * ======================================================
+   * FASE 2 — CLUBES QUE NÃO EXISTEM LOCALMENTE
+   * ======================================================
+   */
+
+  const missingTeams = uniqueTeams.filter(
+    team =>
+      !state.assets.has(
+        's:' + compact(team)
+      )
+  );
+
+  /*
+   * ======================================================
+   * FASE 3 — PESQUISA ONLINE
+   * ======================================================
+   *
+   * Só os que não foram encontrados localmente.
+   */
+
+  await Promise.all(
+    missingTeams.map(team =>
+      searchRemoteShield(team)
+    )
+  );
+
+  const found = uniqueTeams.filter(
+    team =>
+      state.assets.has(
+        's:' + compact(team)
+      )
+  ).length;
+
+  const localFound =
+    uniqueTeams.length -
+    missingTeams.length;
+
+  const onlineFound =
+    found - localFound;
 
   return {
     total: uniqueTeams.length,
-    found: uniqueTeams.filter(team => state.assets.has('s:' + compact(team))).length,
-    seconds: (performance.now() - started) / 1000
+    found,
+    local: localFound,
+    online: onlineFound,
+    seconds:
+      (performance.now() - started) / 1000
   };
 }
 
-function drawContain(ctx, img, x, y, w, h) {
+
+/* =========================================================
+   DESENHO
+   ========================================================= */
+
+function drawContain(
+  ctx,
+  img,
+  x,
+  y,
+  w,
+  h
+) {
   if (!img) return;
 
-  const iw = img.naturalWidth || img.width;
-  const ih = img.naturalHeight || img.height;
-  const s = Math.min(w / iw, h / ih);
+  const iw =
+    img.naturalWidth ||
+    img.width;
+
+  const ih =
+    img.naturalHeight ||
+    img.height;
+
+  const s = Math.min(
+    w / iw,
+    h / ih
+  );
+
   const dw = iw * s;
   const dh = ih * s;
 
@@ -605,12 +944,30 @@ function drawContain(ctx, img, x, y, w, h) {
   );
 }
 
-function drawCover(ctx, img, x, y, w, h, r = 0) {
+function drawCover(
+  ctx,
+  img,
+  x,
+  y,
+  w,
+  h,
+  r = 0
+) {
   if (!img) return;
 
-  const iw = img.naturalWidth || img.width;
-  const ih = img.naturalHeight || img.height;
-  const s = Math.max(w / iw, h / ih);
+  const iw =
+    img.naturalWidth ||
+    img.width;
+
+  const ih =
+    img.naturalHeight ||
+    img.height;
+
+  const s = Math.max(
+    w / iw,
+    h / ih
+  );
+
   const dw = iw * s;
   const dh = ih * s;
 
@@ -618,7 +975,13 @@ function drawCover(ctx, img, x, y, w, h, r = 0) {
 
   if (r) {
     ctx.beginPath();
-    ctx.roundRect(x, y, w, h, r);
+    ctx.roundRect(
+      x,
+      y,
+      w,
+      h,
+      r
+    );
     ctx.clip();
   }
 
@@ -633,36 +996,119 @@ function drawCover(ctx, img, x, y, w, h, r = 0) {
   ctx.restore();
 }
 
-function wrap(ctx, text, x, y, maxWidth, lineHeight, maxLines = 2) {
+
+/* =========================================================
+   TEXTO
+   ========================================================= */
+
+function wrap(
+  ctx,
+  text,
+  x,
+  y,
+  maxWidth,
+  lineHeight,
+  maxLines = 2
+) {
   const words = text.split(/\s+/);
+
   const lines = [];
+
   let line = '';
 
   for (const w of words) {
-    const t = line ? line + ' ' + w : w;
+    const t =
+      line
+        ? line + ' ' + w
+        : w;
 
-    if (ctx.measureText(t).width <= maxWidth) {
+    if (
+      ctx.measureText(t).width <=
+      maxWidth
+    ) {
       line = t;
     } else {
-      if (line) lines.push(line);
+      if (line) {
+        lines.push(line);
+      }
+
       line = w;
     }
   }
 
-  if (line) lines.push(line);
+  if (line) {
+    lines.push(line);
+  }
 
-  lines.slice(0, maxLines).forEach((l, i) => {
-    ctx.fillText(l, x, y + i * lineHeight);
+  const visible =
+    lines.slice(0, maxLines);
+
+  visible.forEach((l, i) => {
+    ctx.fillText(
+      l,
+      x,
+      y + i * lineHeight
+    );
   });
+
+  return visible;
 }
 
-function fit(ctx, text, max, start, min = 24) {
+function wrapLines(
+  ctx,
+  text,
+  maxWidth,
+  maxLines = 2
+) {
+  const words = text.split(/\s+/);
+
+  const lines = [];
+
+  let line = '';
+
+  for (const word of words) {
+    const candidate =
+      line
+        ? `${line} ${word}`
+        : word;
+
+    if (
+      ctx.measureText(candidate).width <=
+      maxWidth
+    ) {
+      line = candidate;
+    } else {
+      if (line) {
+        lines.push(line);
+      }
+
+      line = word;
+    }
+  }
+
+  if (line) {
+    lines.push(line);
+  }
+
+  return lines.slice(0, maxLines);
+}
+
+function fit(
+  ctx,
+  text,
+  max,
+  start,
+  min = 24
+) {
   let s = start;
 
   while (s > min) {
     ctx.font = `700 ${s}px Arial`;
 
-    if (ctx.measureText(text).width <= max) {
+    if (
+      ctx.measureText(text).width <=
+      max
+    ) {
       return s;
     }
 
@@ -672,13 +1118,63 @@ function fit(ctx, text, max, start, min = 24) {
   return s;
 }
 
-function roundRect(ctx, x, y, w, h, r, fill, stroke = null, lineWidth = 1) {
+function fitItalic(
+  ctx,
+  text,
+  max,
+  start,
+  min = 24
+) {
+  let s = start;
+
+  while (s > min) {
+    ctx.font =
+      `900 italic ${s}px Arial`;
+
+    if (
+      ctx.measureText(text).width <=
+      max
+    ) {
+      return s;
+    }
+
+    s -= 2;
+  }
+
+  return s;
+}
+
+
+/* =========================================================
+   ELEMENTOS GRÁFICOS
+   ========================================================= */
+
+function roundRect(
+  ctx,
+  x,
+  y,
+  w,
+  h,
+  r,
+  fill,
+  stroke = null,
+  lineWidth = 1
+) {
   ctx.beginPath();
-  ctx.roundRect(x, y, w, h, r);
+
+  ctx.roundRect(
+    x,
+    y,
+    w,
+    h,
+    r
+  );
+
   if (fill) {
     ctx.fillStyle = fill;
     ctx.fill();
   }
+
   if (stroke) {
     ctx.strokeStyle = stroke;
     ctx.lineWidth = lineWidth;
@@ -686,574 +1182,1966 @@ function roundRect(ctx, x, y, w, h, r, fill, stroke = null, lineWidth = 1) {
   }
 }
 
-function displayCompetition(competition = '') {
-  const n = normalizeText(competition);
-  let title = competition.trim();
-  let detail = '';
+function drawGoldLine(
+  ctx,
+  x1,
+  y,
+  x2
+) {
+  ctx.strokeStyle =
+    '#e7b63d';
 
-  if (n.includes('liga 3')) {
-    title = 'LIGA 3';
-    detail = competition.replace(/.*?liga\s*3\s*/i, '').replace(/^[-–—•|]+\s*/, '').trim();
-  } else if (n.includes('liga placard')) {
-    title = 'LIGA PLACARD';
-    detail = competition.replace(/.*?liga\s*placard\s*/i, '').replace(/^[-–—•|]+\s*/, '').trim();
-  } else if (n.includes('liga bpi')) {
-    title = 'LIGA BPI';
-    detail = competition.replace(/.*?liga\s*bpi\s*/i, '').replace(/^[-–—•|]+\s*/, '').trim();
-  } else if (n.includes('supertaca')) {
-    title = 'SUPERTAÇA';
-    detail = competition.replace(/.*?supertaca\s*/i, '').replace(/^[-–—•|]+\s*/, '').trim();
-  } else {
-    const parts = competition.split(/\s+-\s+/);
-    if (parts.length > 1) {
-      title = parts.shift().trim();
-      detail = parts.join(' • ').trim();
-    }
-  }
-
-  return { title, detail };
-}
-
-function drawGoldLine(ctx, x1, y, x2) {
-  ctx.strokeStyle = '#e7b63d';
   ctx.lineWidth = 2;
+
   ctx.beginPath();
+
   ctx.moveTo(x1, y);
   ctx.lineTo(x2, y);
+
   ctx.stroke();
-  ctx.fillStyle = '#e7b63d';
-  ctx.fillRect((x1 + x2) / 2 - 24, y - 4, 48, 8);
+
+  ctx.fillStyle =
+    '#e7b63d';
+
+  ctx.fillRect(
+    (x1 + x2) / 2 - 24,
+    y - 4,
+    48,
+    8
+  );
 }
 
-function drawTeamBlock(ctx, game, homeShield, awayShield) {
-  // Keep the two team areas completely separated from the central VS line.
+
+/* =========================================================
+   EQUIPAS
+   ========================================================= */
+
+function drawTeamBlock(
+  ctx,
+  game,
+  homeShield,
+  awayShield
+) {
   const y = 505;
+
   const leftCenter = 245;
   const rightCenter = 835;
 
   ctx.textAlign = 'center';
-  ctx.fillStyle = '#e7b63d';
-  ctx.font = '900 68px Arial';
-  ctx.fillText('VS', 540, y + 145);
 
-  ctx.strokeStyle = 'rgba(231,182,61,.82)';
+  ctx.fillStyle =
+    '#e7b63d';
+
+  ctx.font =
+    '900 68px Arial';
+
+  ctx.fillText(
+    'VS',
+    540,
+    y + 145
+  );
+
+  /*
+   * Separadores verticais.
+   */
+  ctx.strokeStyle =
+    'rgba(231,182,61,.82)';
+
   ctx.lineWidth = 2;
+
   ctx.beginPath();
-  ctx.moveTo(385, y + 25); ctx.lineTo(385, y + 265);
-  ctx.moveTo(695, y + 25); ctx.lineTo(695, y + 265);
+
+  ctx.moveTo(
+    385,
+    y + 25
+  );
+
+  ctx.lineTo(
+    385,
+    y + 265
+  );
+
+  ctx.moveTo(
+    695,
+    y + 25
+  );
+
+  ctx.lineTo(
+    695,
+    y + 265
+  );
+
   ctx.stroke();
 
-  drawContain(ctx, homeShield, 120, y + 0, 250, 175);
-  drawContain(ctx, awayShield, 710, y + 0, 250, 175);
+  /*
+   * Escudos.
+   */
+  drawContain(
+    ctx,
+    homeShield,
+    120,
+    y,
+    250,
+    175
+  );
 
-  // Team names are kept inside their own columns so they can never cross
-  // the central separators.
-  ctx.fillStyle = '#f5f7f8';
-  const homeSize = fit(ctx, game.home, 275, 31, 20);
-  ctx.font = `700 ${homeSize}px Arial`;
-  wrap(ctx, game.home, leftCenter, y + 205, 275, homeSize + 7, 2);
+  drawContain(
+    ctx,
+    awayShield,
+    710,
+    y,
+    250,
+    175
+  );
 
-  const awaySize = fit(ctx, game.away, 275, 31, 20);
-  ctx.font = `700 ${awaySize}px Arial`;
-  wrap(ctx, game.away, rightCenter, y + 205, 275, awaySize + 7, 2);
+  /*
+   * Nome equipa casa.
+   */
+  ctx.fillStyle =
+    '#f5f7f8';
+
+  const homeSize = fit(
+    ctx,
+    game.home,
+    275,
+    31,
+    20
+  );
+
+  ctx.font =
+    `700 ${homeSize}px Arial`;
+
+  wrap(
+    ctx,
+    game.home,
+    leftCenter,
+    y + 205,
+    275,
+    homeSize + 7,
+    2
+  );
+
+  /*
+   * Nome equipa visitante.
+   */
+  const awaySize = fit(
+    ctx,
+    game.away,
+    275,
+    31,
+    20
+  );
+
+  ctx.font =
+    `700 ${awaySize}px Arial`;
+
+  wrap(
+    ctx,
+    game.away,
+    rightCenter,
+    y + 205,
+    275,
+    awaySize + 7,
+    2
+  );
 }
 
-function drawMatchInfo(ctx, game) {
-  const date = game.date || game.matchDate || '';
-  const time = game.time || game.matchTime || '';
-  const venue = game.venue || game.stadium || '';
-  if (!date && !time && !venue) return;
 
-  drawGoldLine(ctx, 115, 800, 965);
-  ctx.textAlign = 'left';
-  ctx.fillStyle = '#f5f7f8';
-  ctx.font = '700 25px Arial';
+/* =========================================================
+   DATA / HORA / ESTÁDIO
+   ========================================================= */
 
-  if (date) ctx.fillText('▣  ' + date, 130, 850);
-  if (time) ctx.fillText('◷  ' + time, 430, 850);
+function drawMatchInfo(
+  ctx,
+  game
+) {
+  const date =
+    game.date ||
+    game.matchDate ||
+    '';
+
+  const time =
+    game.time ||
+    game.matchTime ||
+    '';
+
+  const venue =
+    game.venue ||
+    game.stadium ||
+    '';
+
+  if (!date && !time && !venue) {
+    return;
+  }
+
+  drawGoldLine(
+    ctx,
+    115,
+    800,
+    965
+  );
+
+  ctx.textAlign =
+    'left';
+
+  ctx.fillStyle =
+    '#f5f7f8';
+
+  ctx.font =
+    '700 25px Arial';
+
+  if (date) {
+    ctx.fillText(
+      '▣  ' + date,
+      130,
+      850
+    );
+  }
+
+  if (time) {
+    ctx.fillText(
+      '◷  ' + time,
+      430,
+      850
+    );
+  }
+
   if (venue) {
-    ctx.font = '700 22px Arial';
-    wrap(ctx, '◉  ' + venue, 650, 840, 300, 28, 2);
+    ctx.font =
+      '700 22px Arial';
+
+    wrap(
+      ctx,
+      '◉  ' + venue,
+      650,
+      840,
+      300,
+      28,
+      2
+    );
   }
 }
 
-function drawOfficialCard(ctx, official, x, y, w, h) {
-  // New visual treatment: no dark card and no strip over the photograph.
-  // The referee photo is a straight Polaroid-style print, with the
-  // function/name information aligned cleanly to its right.
-  const photoW = Math.min(245, h * 0.82);
-  const photoH = Math.min(h - 20, photoW * 1.18);
-  const photoX = x + 18;
-  const photoY = y + (h - photoH) / 2;
+
+/* =========================================================
+   CARTÃO DO ÁRBITRO
+   ========================================================= */
+
+function drawOfficialCard(
+  ctx,
+  official,
+  x,
+  y,
+  w,
+  h
+) {
+  /*
+   * Fotografia à esquerda.
+   */
+  const photoW =
+    Math.min(
+      245,
+      h * 0.82
+    );
+
+  const photoH =
+    Math.min(
+      h - 20,
+      photoW * 1.18
+    );
+
+  const photoX =
+    x + 18;
+
+  const photoY =
+    y + (h - photoH) / 2;
+
   const frame = 12;
 
+  /*
+   * Moldura da fotografia.
+   */
   ctx.save();
-  ctx.shadowColor = 'rgba(0,0,0,.30)';
+
+  ctx.shadowColor =
+    'rgba(0,0,0,.30)';
+
   ctx.shadowBlur = 14;
+
   ctx.shadowOffsetY = 6;
-  ctx.fillStyle = '#f4f1e9';
-  ctx.fillRect(photoX, photoY, photoW, photoH);
+
+  ctx.fillStyle =
+    '#f4f1e9';
+
+  ctx.fillRect(
+    photoX,
+    photoY,
+    photoW,
+    photoH
+  );
+
   ctx.restore();
 
-  const photo = state.assets.get('p:' + compact(official.name)) || null;
+  const photo =
+    state.assets.get(
+      'p:' + compact(official.name)
+    ) || null;
+
   if (photo) {
-    drawCover(ctx, photo, photoX + frame, photoY + frame, photoW - frame * 2, photoH - frame * 2, 0);
+    drawCover(
+      ctx,
+      photo,
+      photoX + frame,
+      photoY + frame,
+      photoW - frame * 2,
+      photoH - frame * 2,
+      0
+    );
   } else {
-    ctx.fillStyle = '#596b73';
-    ctx.fillRect(photoX + frame, photoY + frame, photoW - frame * 2, photoH - frame * 2);
+    ctx.fillStyle =
+      '#596b73';
+
+    ctx.fillRect(
+      photoX + frame,
+      photoY + frame,
+      photoW - frame * 2,
+      photoH - frame * 2
+    );
   }
 
-  const textX = photoX + photoW + 55;
-  const textW = x + w - textX - 25;
+  /*
+   * ======================================================
+   * TEXTO AO LADO DA FOTOGRAFIA
+   * ======================================================
+   *
+   * Tudo fica no mesmo bloco:
+   *
+   * FUNÇÃO
+   *
+   * NOME
+   *
+   * A.F. COIMBRA
+   *
+   * Sem os grandes espaços verticais que existiam antes.
+   */
 
-  ctx.textAlign = 'left';
-  ctx.fillStyle = '#e7b63d';
-  ctx.font = `700 ${Math.max(22, Math.min(34, h * 0.12))}px Arial`;
-  ctx.fillText(official.role.toUpperCase(), textX, y + h * 0.30);
+  const textX =
+    photoX +
+    photoW +
+    45;
 
-  ctx.fillStyle = '#f5f7f8';
-  const nameSize = fit(
-    ctx,
-    official.name.toUpperCase(),
-    textW,
-    Math.max(34, Math.min(62, h * 0.22)),
-    22
+  const textW =
+    x +
+    w -
+    textX -
+    25;
+
+  ctx.textAlign =
+    'left';
+
+  /*
+   * Tamanho da função.
+   */
+  const roleSize =
+    Math.max(
+      20,
+      Math.min(
+        29,
+        h * 0.105
+      )
+    );
+
+  /*
+   * Tamanho do nome.
+   */
+  const nameSize =
+    fit(
+      ctx,
+      official.name.toUpperCase(),
+      textW,
+      Math.max(
+        34,
+        Math.min(
+          54,
+          h * 0.18
+        )
+      ),
+      22
+    );
+
+  /*
+   * Calculamos primeiro as linhas do nome.
+   * Isto permite colocar A.F. COIMBRA logo depois,
+   * sem risco de sobreposição.
+   */
+  ctx.font =
+    `900 ${nameSize}px Arial`;
+
+  const nameLines =
+    wrapLines(
+      ctx,
+      official.name.toUpperCase(),
+      textW,
+      2
+    );
+
+  const nameLineHeight =
+    nameSize + 4;
+
+  /*
+   * Altura total do bloco.
+   */
+  const roleGap = 14;
+  const afterNameGap = 14;
+
+  const totalHeight =
+    roleSize +
+    roleGap +
+    nameLines.length * nameLineHeight +
+    afterNameGap +
+    26;
+
+  /*
+   * Começa verticalmente centrado
+   * relativamente à fotografia.
+   */
+  let cursorY =
+    y +
+    (h - totalHeight) / 2;
+
+  /*
+   * FUNÇÃO
+   */
+  ctx.fillStyle =
+    '#e7b63d';
+
+  ctx.font =
+    `700 ${roleSize}px Arial`;
+
+  ctx.fillText(
+    official.role.toUpperCase(),
+    textX,
+    cursorY + roleSize
   );
-  ctx.font = `900 ${nameSize}px Arial`;
-  wrap(ctx, official.name.toUpperCase(), textX, y + h * 0.54, textW, nameSize + 6, 2);
 
-  ctx.fillStyle = '#e7b63d';
-  ctx.font = `700 ${Math.max(20, Math.min(29, h * 0.10))}px Arial`;
-  ctx.fillText('A.F. COIMBRA', textX, y + h * 0.78);
+  cursorY +=
+    roleSize +
+    roleGap;
+
+  /*
+   * NOME
+   */
+  ctx.fillStyle =
+    '#f5f7f8';
+
+  ctx.font =
+    `900 ${nameSize}px Arial`;
+
+  for (const line of nameLines) {
+    ctx.fillText(
+      line,
+      textX,
+      cursorY + nameSize
+    );
+
+    cursorY +=
+      nameLineHeight;
+  }
+
+  cursorY +=
+    afterNameGap;
+
+  /*
+   * A.F. COIMBRA
+   */
+  const afSize =
+    Math.max(
+      18,
+      Math.min(
+        26,
+        h * 0.09
+      )
+    );
+
+  ctx.fillStyle =
+    '#e7b63d';
+
+  ctx.font =
+    `700 ${afSize}px Arial`;
+
+  ctx.fillText(
+    'A.F. COIMBRA',
+    textX,
+    cursorY + afSize
+  );
 }
 
+
+/* =========================================================
+   NOME DA COMPETIÇÃO
+   ========================================================= */
+
+function displayCompetition(
+  competition = ''
+) {
+  const n =
+    normalizeText(competition);
+
+  let title =
+    competition.trim();
+
+  let detail = '';
+
+  if (n.includes('liga 3')) {
+    title = 'LIGA 3';
+
+    detail =
+      competition
+        .replace(
+          /.*?liga\s*3\s*/i,
+          ''
+        )
+        .replace(
+          /^[-–—•|]+\s*/,
+          ''
+        )
+        .trim();
+
+  } else if (n.includes('liga placard')) {
+    title =
+      'LIGA PLACARD';
+
+    detail =
+      competition
+        .replace(
+          /.*?liga\s*placard\s*/i,
+          ''
+        )
+        .replace(
+          /^[-–—•|]+\s*/,
+          ''
+        )
+        .trim();
+
+  } else if (n.includes('liga bpi')) {
+    title =
+      'LIGA BPI';
+
+    detail =
+      competition
+        .replace(
+          /.*?liga\s*bpi\s*/i,
+          ''
+        )
+        .replace(
+          /^[-–—•|]+\s*/,
+          ''
+        )
+        .trim();
+
+  } else if (n.includes('supertaca')) {
+    title =
+      'SUPERTAÇA';
+
+    detail =
+      competition
+        .replace(
+          /.*?supertaca\s*/i,
+          ''
+        )
+        .replace(
+          /^[-–—•|]+\s*/,
+          ''
+        )
+        .trim();
+
+  } else {
+    const parts =
+      competition.split(/\s+-\s+/);
+
+    if (parts.length > 1) {
+      title =
+        parts.shift().trim();
+
+      detail =
+        parts
+          .join(' • ')
+          .trim();
+    }
+  }
+
+  return {
+    title,
+    detail
+  };
+}
+
+
+/* =========================================================
+   TÍTULO DA COMPETIÇÃO
+   ========================================================= */
+
+function drawCompetitionTitle(
+  ctx,
+  comp
+) {
+  const centerX = 540;
+
+  /*
+   * Pequeno título "COMPETIÇÃO".
+   */
+  ctx.textAlign =
+    'center';
+
+  ctx.fillStyle =
+    '#e7b63d';
+
+  ctx.font =
+    '700 23px Arial';
+
+  ctx.fillText(
+    'COMPETIÇÃO',
+    centerX,
+    225
+  );
+
+  /*
+   * Título principal.
+   */
+  const titleY = 315;
+
+  const match =
+    comp.title.match(
+      /^(.*?)(\d+)$/
+    );
+
+  if (match) {
+    const left =
+      match[1].trimEnd();
+
+    const num =
+      match[2];
+
+    const titleSize = 112;
+
+    ctx.font =
+      `900 ${titleSize}px Arial`;
+
+    const gap = 10;
+
+    const leftW =
+      ctx.measureText(left).width;
+
+    const numW =
+      ctx.measureText(num).width;
+
+    const totalW =
+      leftW +
+      gap +
+      numW;
+
+    let x =
+      centerX -
+      totalW / 2;
+
+    /*
+     * Parte textual.
+     */
+    ctx.textAlign =
+      'left';
+
+    ctx.fillStyle =
+      '#f5f7f8';
+
+    ctx.fillText(
+      left,
+      x,
+      titleY
+    );
+
+    /*
+     * Número.
+     */
+    x +=
+      leftW +
+      gap;
+
+    ctx.fillStyle =
+      '#e7b63d';
+
+    ctx.fillText(
+      num,
+      x,
+      titleY
+    );
+
+  } else {
+    const titleSize =
+      fit(
+        ctx,
+        comp.title,
+        860,
+        108,
+        54
+      );
+
+    ctx.textAlign =
+      'center';
+
+    ctx.font =
+      `900 ${titleSize}px Arial`;
+
+    ctx.fillStyle =
+      '#f5f7f8';
+
+    ctx.fillText(
+      comp.title,
+      centerX,
+      titleY
+    );
+  }
+
+  /*
+   * Linha dourada.
+   */
+  drawGoldLine(
+    ctx,
+    300,
+    365,
+    780
+  );
+
+  /*
+   * ======================================================
+   * SUBTÍTULO / SEGUNDA FRASE
+   * ======================================================
+   *
+   * É medido e centrado pelo tamanho real.
+   */
+  if (comp.detail) {
+    const detailSize =
+      fit(
+        ctx,
+        comp.detail,
+        850,
+        25,
+        15
+      );
+
+    ctx.font =
+      `700 ${detailSize}px Arial`;
+
+    ctx.textAlign =
+      'center';
+
+    ctx.fillStyle =
+      '#f5f7f8';
+
+    ctx.fillText(
+      comp.detail,
+      centerX,
+      415
+    );
+  }
+}
+
+
+/* =========================================================
+   RENDER FINAL
+   ========================================================= */
+
 function render(game) {
-  const canvas = document.createElement('canvas');
+  const canvas =
+    document.createElement('canvas');
+
   canvas.width = 1080;
   canvas.height = 1920;
-  const ctx = canvas.getContext('2d');
 
-  const bg = state.assets.get('background');
-  if (bg) ctx.drawImage(bg, 0, 0, 1080, 1920);
-  else {
-    ctx.fillStyle = '#10222b';
-    ctx.fillRect(0, 0, 1080, 1920);
-  }
+  const ctx =
+    canvas.getContext('2d');
 
-  const homeShield = state.assets.get('s:' + compact(game.home)) || null;
-  const awayShield = state.assets.get('s:' + compact(game.away)) || null;
+  /*
+   * ======================================================
+   * BACKGROUND
+   * ======================================================
+   */
 
-  // The background already contains the original header and logo.
-  // Keep the hashtag below the header so it can never collide with the logo.
-    // #TambemEstamosEmJogo
-  // Calcula a largura real de cada parte para que nunca haja sobreposição.
-  ctx.font = '900 italic 52px Arial';
+  const bg =
+    state.assets.get(
+      'background'
+    );
 
-  const hashtag1 = '#TambemEstamos';
-  const hashtag2 = 'EmJogo';
-  const hashtagGap = 12;
-
-  const hashtagW1 = ctx.measureText(hashtag1).width;
-  const hashtagW2 = ctx.measureText(hashtag2).width;
-  const hashtagTotalW = hashtagW1 + hashtagGap + hashtagW2;
-
-  let hashtagX = 540 - hashtagTotalW / 2;
-
-  ctx.textAlign = 'left';
-
-  ctx.fillStyle = '#f5f7f8';
-  ctx.fillText(hashtag1, hashtagX, 155);
-
-  hashtagX += hashtagW1 + hashtagGap;
-
-  ctx.fillStyle = '#e7b63d';
-  ctx.fillText(hashtag2, hashtagX, 155);
-
-  const comp = displayCompetition(game.competition);
-  ctx.fillStyle = '#e7b63d';
-  ctx.font = '700 23px Arial';
-  ctx.fillText('COMPETIÇÃO', 540, 225);
-
-  // Draw the competition title as one centred unit, colouring only the final
-  // numeric part gold. This prevents the previous duplicated/offset title.
-  const titleY = 315;
-  const match = comp.title.match(/^(.*?)(\d+)$/);
-  if (match) {
-    const left = match[1].trimEnd();
-    const num = match[2];
-    ctx.font = '900 112px Arial';
-    const gap = 10;
-    const totalW = ctx.measureText(left).width + gap + ctx.measureText(num).width;
-    let tx = 540 - totalW / 2;
-    ctx.fillStyle = '#f5f7f8';
-    ctx.fillText(left, tx + ctx.measureText(left).width / 2, titleY);
-    tx += ctx.measureText(left).width + gap;
-    ctx.fillStyle = '#e7b63d';
-    ctx.fillText(num, tx + ctx.measureText(num).width / 2, titleY);
+  if (bg) {
+    ctx.drawImage(
+      bg,
+      0,
+      0,
+      1080,
+      1920
+    );
   } else {
-    ctx.fillStyle = '#f5f7f8';
-    const titleSize = fit(ctx, comp.title, 860, 108, 54);
-    ctx.font = `900 ${titleSize}px Arial`;
-    ctx.fillText(comp.title, 540, titleY);
+    ctx.fillStyle =
+      '#10222b';
+
+    ctx.fillRect(
+      0,
+      0,
+      1080,
+      1920
+    );
   }
 
-  drawGoldLine(ctx, 300, 365, 780);
-  ctx.fillStyle = '#f5f7f8';
-  ctx.font = `700 ${fit(ctx, comp.detail || game.competition, 900, 25, 16)}px Arial`;
-  ctx.fillText(comp.detail || '', 540, 415);
 
-  drawTeamBlock(ctx, game, homeShield, awayShield);
-  drawMatchInfo(ctx, game);
+  /*
+   * ======================================================
+   * HASHTAG
+   * ======================================================
+   *
+   * IMPORTANTE:
+   *
+   * O logótipo "NÚCLEO DE ÁRBITROS..."
+   * está no canto superior direito do background.
+   *
+   * Por isso o hashtag NÃO usa o centro absoluto
+   * de 540px.
+   *
+   * A área disponível termina antes do logótipo.
+   *
+   * O texto é calculado pela largura real para nunca
+   * sobrepor nem sair da área.
+   */
 
-  const count = Math.max(1, Math.min(game.officials.length, 4));
-  let top = (game.date || game.matchDate || game.time || game.matchTime || game.venue || game.stadium) ? 865 : 815;
-  const bottom = 1765;
-  const gap = count >= 4 ? 10 : 16;
-  const cardH = Math.floor((bottom - top - gap * (count - 1)) / count);
-  const cardX = 95;
-  const cardW = 890;
+  const hashtag =
+    '#TambemEstamos';
 
-  game.officials.slice(0, 4).forEach((official, i) => {
-    drawOfficialCard(ctx, official, cardX, top + i * (cardH + gap), cardW, cardH);
-  });
+  const hashtag2 =
+    'EmJogo';
 
-  drawGoldLine(ctx, 130, 1810, 950);
-  ctx.textAlign = 'center';
-  ctx.fillStyle = '#f5f7f8';
-  ctx.font = '700 23px Arial';
-  ctx.fillText('TRABALHO  •  COMPETÊNCIA  •  DEDICAÇÃO', 540, 1860);
+  /*
+   * Área segura do hashtag.
+   *
+   * Mantemos o lado direito afastado do logótipo.
+   */
+  const hashtagAreaLeft = 130;
+  const hashtagAreaRight = 850;
+
+  const hashtagAreaWidth =
+    hashtagAreaRight -
+    hashtagAreaLeft;
+
+  const hashtagGap = 14;
+
+  const hashtagFontSize =
+    fitItalic(
+      ctx,
+      hashtag + hashtag2,
+      hashtagAreaWidth - 20,
+      52,
+      34
+    );
+
+  ctx.font =
+    `900 italic ${hashtagFontSize}px Arial`;
+
+  const hashtagW =
+    ctx.measureText(
+      hashtag
+    ).width;
+
+  const hashtag2W =
+    ctx.measureText(
+      hashtag2
+    ).width;
+
+  const totalHashtagWidth =
+    hashtagW +
+    hashtagGap +
+    hashtag2W;
+
+  /*
+   * Centro da área segura, e não o centro
+   * do canvas inteiro.
+   */
+  let hashtagX =
+    hashtagAreaLeft +
+    (
+      hashtagAreaWidth -
+      totalHashtagWidth
+    ) / 2;
+
+  ctx.textAlign =
+    'left';
+
+  /*
+   * Primeira parte.
+   */
+  ctx.fillStyle =
+    '#f5f7f8';
+
+  ctx.fillText(
+    hashtag,
+    hashtagX,
+    155
+  );
+
+  /*
+   * Segunda parte.
+   */
+  hashtagX +=
+    hashtagW +
+    hashtagGap;
+
+  ctx.fillStyle =
+    '#e7b63d';
+
+  ctx.fillText(
+    hashtag2,
+    hashtagX,
+    155
+  );
+
+
+  /*
+   * ======================================================
+   * COMPETIÇÃO
+   * ======================================================
+   */
+
+  const comp =
+    displayCompetition(
+      game.competition
+    );
+
+  drawCompetitionTitle(
+    ctx,
+    comp
+  );
+
+
+  /*
+   * ======================================================
+   * EQUIPAS
+   * ======================================================
+   */
+
+  const homeShield =
+    state.assets.get(
+      's:' + compact(game.home)
+    ) || null;
+
+  const awayShield =
+    state.assets.get(
+      's:' + compact(game.away)
+    ) || null;
+
+  drawTeamBlock(
+    ctx,
+    game,
+    homeShield,
+    awayShield
+  );
+
+
+  /*
+   * ======================================================
+   * DATA / LOCAL
+   * ======================================================
+   */
+
+  drawMatchInfo(
+    ctx,
+    game
+  );
+
+
+  /*
+   * ======================================================
+   * OFICIAIS
+   * ======================================================
+   */
+
+  const count =
+    Math.max(
+      1,
+      Math.min(
+        game.officials.length,
+        4
+      )
+    );
+
+  let top =
+    (
+      game.date ||
+      game.matchDate ||
+      game.time ||
+      game.matchTime ||
+      game.venue ||
+      game.stadium
+    )
+      ? 865
+      : 815;
+
+  const bottom =
+    1765;
+
+  const gap =
+    count >= 4
+      ? 10
+      : 16;
+
+  const cardH =
+    Math.floor(
+      (
+        bottom -
+        top -
+        gap * (count - 1)
+      ) / count
+    );
+
+  const cardX =
+    95;
+
+  const cardW =
+    890;
+
+  game.officials
+    .slice(0, 4)
+    .forEach(
+      (official, i) => {
+        drawOfficialCard(
+          ctx,
+          official,
+          cardX,
+          top +
+            i *
+              (cardH + gap),
+          cardW,
+          cardH
+        );
+      }
+    );
+
+
+  /*
+   * ======================================================
+   * RODAPÉ
+   * ======================================================
+   */
+
+  drawGoldLine(
+    ctx,
+    130,
+    1810,
+    950
+  );
+
+  ctx.textAlign =
+    'center';
+
+  ctx.fillStyle =
+    '#f5f7f8';
+
+  ctx.font =
+    '700 23px Arial';
+
+  ctx.fillText(
+    'TRABALHO  •  COMPETÊNCIA  •  DEDICAÇÃO',
+    540,
+    1860
+  );
 
   return canvas;
 }
 
+
+/* =========================================================
+   RESULTADOS
+   ========================================================= */
+
 function showGames() {
-  $('results').innerHTML = state.games.map(g => `
-    <div class="result">
-      <b>${escapeHtml(g.home)}</b>
-      <span>vs</span>
-      <b>${escapeHtml(g.away)}</b>
-      <small>${escapeHtml(g.competition)}</small>
-      <p>
-        ${g.officials.map(o =>
-          escapeHtml(o.name) + ' — ' + escapeHtml(o.role)
-        ).join('<br>')}
-      </p>
-    </div>
-  `).join('');
+  $('results').innerHTML =
+    state.games
+      .map(g => `
+        <div class="result">
+          <b>${escapeHtml(g.home)}</b>
+          <span>vs</span>
+          <b>${escapeHtml(g.away)}</b>
+
+          <small>
+            ${escapeHtml(g.competition)}
+          </small>
+
+          <p>
+            ${g.officials
+              .map(o =>
+                escapeHtml(o.name) +
+                ' — ' +
+                escapeHtml(o.role)
+              )
+              .join('<br>')}
+          </p>
+        </div>
+      `)
+      .join('');
 }
+
+
+/* =========================================================
+   VERIFICAÇÃO DOS ASSETS
+   ========================================================= */
 
 async function checkAssets(games) {
   await loadIdentity();
 
   const missing = [];
-  if (!state.assets.has('logo')) missing.push({ type: 'logo', key: 'logo' });
 
-  const people = [...new Map(
-    games.flatMap(g => g.officials.map(o => [compact(o.name), o.name]))
-  ).values()];
+  /*
+   * Logo.
+   */
+  if (!state.assets.has('logo')) {
+    missing.push({
+      type: 'logo',
+      key: 'logo'
+    });
+  }
 
-  // Photos are local. Load them all in parallel.
-  const photoResults = await Promise.all(
-    people.map(async name => [name, await personImage(name)])
-  );
+  /*
+   * Fotografias.
+   */
+  const people =
+    [
+      ...new Map(
+        games.flatMap(
+          g =>
+            g.officials.map(
+              o => [
+                compact(o.name),
+                o.name
+              ]
+            )
+        )
+      ).values()
+    ];
+
+  const photoResults =
+    await Promise.all(
+      people.map(
+        async name => [
+          name,
+          await personImage(name)
+        ]
+      )
+    );
+
   for (const [name, img] of photoResults) {
-    if (!img) missing.push({ type: 'foto', key: name });
+    if (!img) {
+      missing.push({
+        type: 'foto',
+        key: name
+      });
+    }
   }
 
-  // Shields are intentionally NOT searched here. By the time the user can
-  // click Generate they have already been warmed by analyze().
+  /*
+   * Escudos.
+   *
+   * NÃO fazemos pesquisa online aqui.
+   *
+   * O prefetchShields() já tratou:
+   *
+   * local → online
+   *
+   * antes de chegarmos à geração.
+   */
   for (const g of games) {
-    if (!state.assets.has('s:' + compact(g.home))) {
-      missing.push({ type: 'escudo', key: g.home });
+    if (
+      !state.assets.has(
+        's:' + compact(g.home)
+      )
+    ) {
+      missing.push({
+        type: 'escudo',
+        key: g.home
+      });
     }
-    if (!state.assets.has('s:' + compact(g.away))) {
-      missing.push({ type: 'escudo', key: g.away });
+
+    if (
+      !state.assets.has(
+        's:' + compact(g.away)
+      )
+    ) {
+      missing.push({
+        type: 'escudo',
+        key: g.away
+      });
     }
   }
 
-  const unique = [...new Map(
-    missing.map(x => [x.type + ':' + compact(x.key), x])
-  ).values()];
+  const unique =
+    [
+      ...new Map(
+        missing.map(
+          x => [
+            x.type +
+              ':' +
+              compact(x.key),
+            x
+          ]
+        )
+      ).values()
+    ];
 
-  // Missing shields are shown, but do not cause another network lookup.
-  // Missing photos/logo still block the final publication.
-  const blocking = unique.filter(x => x.type !== 'escudo');
+  /*
+   * Escudos não bloqueiam a geração.
+   * Fotografias/logo bloqueiam.
+   */
+  const blocking =
+    unique.filter(
+      x => x.type !== 'escudo'
+    );
+
   if (blocking.length) {
     renderMissing(blocking);
     return false;
   }
 
-  if (unique.length) renderMissing(unique);
-  else $('missingAssets').hidden = true;
+  if (unique.length) {
+    renderMissing(unique);
+  } else {
+    $('missingAssets').hidden =
+      true;
+  }
+
   return true;
 }
 
-function renderMissing(items) {
-  const unique = [
-    ...new Map(
-      items.map(x => [x.type + ':' + compact(x.key), x])
-    ).values()
-  ];
 
-  $('missingAssets').hidden = false;
+/* =========================================================
+   FICHEIROS EM FALTA
+   ========================================================= */
+
+function renderMissing(items) {
+  const unique =
+    [
+      ...new Map(
+        items.map(
+          x => [
+            x.type +
+              ':' +
+              compact(x.key),
+            x
+          ]
+        )
+      ).values()
+    ];
+
+  $('missingAssets').hidden =
+    false;
 
   $('missingAssets').innerHTML = `
     <div class="missingBox">
       <h3>Faltam ficheiros antes de gerar</h3>
-      <p>O gerador bloqueia a criação para não sair uma publicação incompleta.</p>
-      ${unique.map(x => `
-        <div class="missingRow">
-          <span>
-            <b>${
-              x.type === 'foto'
-                ? 'Fotografia'
-                : x.type === 'escudo'
-                  ? 'Escudo'
-                  : 'Logo'
-            }</b>: ${escapeHtml(x.key)}
-          </span>
-          <input
-            type="file"
-            accept="image/png,image/jpeg,image/webp"
-            data-key="${escapeHtml(x.type + '|' + x.key)}"
-          >
-        </div>
-      `).join('')}
-      <button id="useMissing" class="secondary">
+
+      <p>
+        O gerador bloqueia a criação para não sair
+        uma publicação incompleta.
+      </p>
+
+      ${unique
+        .map(
+          x => `
+            <div class="missingRow">
+              <span>
+                <b>
+                  ${
+                    x.type === 'foto'
+                      ? 'Fotografia'
+                      : x.type === 'escudo'
+                        ? 'Escudo'
+                        : 'Logo'
+                  }
+                </b>:
+                ${escapeHtml(x.key)}
+              </span>
+
+              <input
+                type="file"
+                accept="image/png,image/jpeg,image/webp"
+                data-key="${escapeHtml(
+                  x.type + '|' + x.key
+                )}"
+              >
+            </div>
+          `
+        )
+        .join('')}
+
+      <button
+        id="useMissing"
+        class="secondary"
+      >
         Usar ficheiros nesta sessão
       </button>
     </div>
   `;
 
-  $('useMissing').onclick = async () => {
-    for (const input of $('missingAssets').querySelectorAll('input[type=file]')) {
-      if (!input.files[0]) continue;
+  $('useMissing').onclick =
+    async () => {
+      for (
+        const input of
+        $('missingAssets')
+          .querySelectorAll(
+            'input[type=file]'
+          )
+      ) {
+        if (!input.files[0]) {
+          continue;
+        }
 
-      const [type, key] = input.dataset.key.split('|');
-      const img = await fileToImage(input.files[0]);
+        const [
+          type,
+          key
+        ] =
+          input.dataset.key
+            .split('|');
 
-      state.assets.set(
-        type === 'foto'
-          ? 'p:' + compact(key)
-          : type === 'escudo'
-            ? 's:' + compact(key)
-            : 'logo',
-        img
+        const img =
+          await fileToImage(
+            input.files[0]
+          );
+
+        state.assets.set(
+          type === 'foto'
+            ? 'p:' + compact(key)
+            : type === 'escudo'
+              ? 's:' + compact(key)
+              : 'logo',
+          img
+        );
+      }
+
+      setStatus(
+        'Ficheiros carregados. Podes gerar novamente.'
       );
-    }
-
-    setStatus('Ficheiros carregados. Podes gerar novamente.');
-  };
+    };
 }
+
+
+/* =========================================================
+   FICHEIRO → IMAGEM
+   ========================================================= */
 
 function fileToImage(file) {
-  return new Promise((resolve, reject) => {
-    const u = URL.createObjectURL(file);
-    const img = new Image();
+  return new Promise(
+    (resolve, reject) => {
+      const u =
+        URL.createObjectURL(file);
 
-    img.onload = () => {
-      URL.revokeObjectURL(u);
-      resolve(img);
-    };
+      const img =
+        new Image();
 
-    img.onerror = reject;
-    img.src = u;
-  });
+      img.onload = () => {
+        URL.revokeObjectURL(u);
+        resolve(img);
+      };
+
+      img.onerror =
+        reject;
+
+      img.src = u;
+    }
+  );
 }
 
+
+/* =========================================================
+   ANALISAR PDF
+   ========================================================= */
+
 async function analyze() {
-  const file = $('pdfFile').files[0];
-  if (!file) return setError('Escolhe primeiro o PDF da FPF.');
+  const file =
+    $('pdfFile').files[0];
 
-  const names = $('names').value.split(/\r?\n/).map(x => x.trim()).filter(Boolean);
-  if (!names.length) return setError('Coloca pelo menos um nome na lista.');
+  if (!file) {
+    return setError(
+      'Escolhe primeiro o PDF da FPF.'
+    );
+  }
 
-  state.names = new Map(names.map(n => [compact(n), n]));
+  const names =
+    $('names')
+      .value
+      .split(/\r?\n/)
+      .map(x => x.trim())
+      .filter(Boolean);
+
+  if (!names.length) {
+    return setError(
+      'Coloca pelo menos um nome na lista.'
+    );
+  }
+
+  state.names =
+    new Map(
+      names.map(
+        n => [
+          compact(n),
+          n
+        ]
+      )
+    );
+
   state.assets.clear();
-  setStatus('A ler o PDF e a reconstruir as nomeações...');
+
+  setStatus(
+    'A ler o PDF e a reconstruir as nomeações...'
+  );
 
   try {
-    const data = await extractPDF(file);
-    state.pages = data.pages;
-    state.games = parsePages(data.pages);
+    /*
+     * PDF.
+     */
+    const data =
+      await extractPDF(file);
+
+    state.pages =
+      data.pages;
+
+    state.games =
+      parsePages(data.pages);
 
     if (!state.games.length) {
-      return setError(`PDF lido (${data.numPages} páginas), mas não foi encontrado nenhum jogo com os nomes indicados.`);
+      return setError(
+        `PDF lido (${data.numPages} páginas), ` +
+        `mas não foi encontrado nenhum jogo ` +
+        `com os nomes indicados.`
+      );
     }
 
     showGames();
+
+    /*
+     * Identidade / background.
+     */
     await loadIdentity();
 
-    // Photos are local and fast. Prepare them in parallel before generation.
-    const people = [...new Map(
-      state.games.flatMap(g => g.officials.map(o => [compact(o.name), o.name]))
-    ).values()];
-    await Promise.all(people.map(name => personImage(name)));
+    /*
+     * Fotografias locais em paralelo.
+     */
+    const people =
+      [
+        ...new Map(
+          state.games.flatMap(
+            g =>
+              g.officials.map(
+                o => [
+                  compact(o.name),
+                  o.name
+                ]
+              )
+          )
+        ).values()
+      ];
 
-    const warmup = prefetchShields(state.games);
-    const limit = new Promise(resolve => setTimeout(() => resolve({timeout: true}), 12000));
-    const result = await Promise.race([warmup, limit]);
+    await Promise.all(
+      people.map(
+        name =>
+          personImage(name)
+      )
+    );
 
-    $('generateBtn').disabled = false;
+    /*
+     * ======================================================
+     * ESCUDOS
+     * ======================================================
+     *
+     * A ordem é:
+     *
+     * TODOS locais
+     *       ↓
+     * identificar faltantes
+     *       ↓
+     * online apenas para faltantes
+     */
+
+    const warmup =
+      prefetchShields(
+        state.games
+      );
+
+    /*
+     * Não bloqueamos a aplicação por mais de 12 segundos.
+     * Se chegar ao limite, o processo de pesquisa continua
+     * em background.
+     */
+    const limit =
+      new Promise(
+        resolve =>
+          setTimeout(
+            () =>
+              resolve({
+                timeout: true
+              }),
+            12000
+          )
+      );
+
+    const result =
+      await Promise.race([
+        warmup,
+        limit
+      ]);
+
+    $('generateBtn').disabled =
+      false;
 
     if (result?.timeout) {
-      setStatus(`Pronto em menos de 30 s. A pesquisa de escudos demorou mais de 12 s; não vou bloquear a aplicação. Os escudos ainda podem continuar a chegar em segundo plano.`);
+      setStatus(
+        'Pronto. A pesquisa dos escudos ' +
+        'demorou mais de 12 s; a aplicação não ' +
+        'fica bloqueada. Os escudos continuam a ' +
+        'ser preparados em segundo plano.'
+      );
     } else {
-      setStatus(`Pronto: ${state.games.length} jogo(s), ${result.found}/${result.total} escudos preparados em ${result.seconds.toFixed(1)} s. A geração dos JPG não faz pesquisas.`);
-    }
-  } catch (e) {
-    console.error(e);
-    setError('Erro ao ler o PDF: ' + (e?.message || e));
-  }
-}
-
-async function generateAll() {
-  if (!state.games.length) return;
-
-  const started = performance.now();
-  const ok = await checkAssets(state.games);
-  if (!ok) return;
-
-  setStatus('A gerar os JPG — sem pesquisas externas...');
-  const zip = new JSZip();
-  const batchSize = 4;
-
-  for (let i = 0; i < state.games.length; i += batchSize) {
-    const batch = state.games.slice(i, i + batchSize);
-    const blobs = await Promise.all(batch.map(async (g, j) => {
-      const canvas = render(g);
-      const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', .92));
-      return { g, blob };
-    }));
-
-    for (const { g, blob } of blobs) {
-      zip.file(
-        safeFile(`${String(state.games.indexOf(g) + 1).padStart(2, '0')} - ${g.home} - ${g.away}.jpg`).slice(0, 150),
-        blob,
-        { compression: 'STORE' }
+      setStatus(
+        `Pronto: ${state.games.length} jogo(s), ` +
+        `${result.found}/${result.total} escudos preparados. ` +
+        `Local: ${result.local}. ` +
+        `Online: ${result.online}. ` +
+        `Tempo: ${result.seconds.toFixed(1)} s.`
       );
     }
 
-    const elapsed = (performance.now() - started) / 1000;
-    setStatus(`A gerar JPG ${Math.min(i + batchSize, state.games.length)}/${state.games.length}... ${elapsed.toFixed(1)} s`);
+  } catch (e) {
+    console.error(e);
+
+    setError(
+      'Erro ao ler o PDF: ' +
+      (e?.message || e)
+    );
+  }
+}
+
+
+/* =========================================================
+   GERAR TODOS
+   ========================================================= */
+
+async function generateAll() {
+  if (!state.games.length) {
+    return;
+  }
+
+  const started =
+    performance.now();
+
+  /*
+   * NÃO há pesquisa de escudos aqui.
+   */
+  const ok =
+    await checkAssets(
+      state.games
+    );
+
+  if (!ok) {
+    return;
+  }
+
+  setStatus(
+    'A gerar os JPG — sem pesquisas externas...'
+  );
+
+  const zip =
+    new JSZip();
+
+  const batchSize = 4;
+
+  for (
+    let i = 0;
+    i < state.games.length;
+    i += batchSize
+  ) {
+    const batch =
+      state.games.slice(
+        i,
+        i + batchSize
+      );
+
+    const blobs =
+      await Promise.all(
+        batch.map(
+          async g => {
+            const canvas =
+              render(g);
+
+            const blob =
+              await new Promise(
+                resolve =>
+                  canvas.toBlob(
+                    resolve,
+                    'image/jpeg',
+                    .92
+                  )
+              );
+
+            return {
+              g,
+              blob
+            };
+          }
+        )
+      );
+
+    for (const {
+      g,
+      blob
+    } of blobs) {
+      zip.file(
+        safeFile(
+          `${String(
+            state.games.indexOf(g) + 1
+          ).padStart(2, '0')} - ` +
+          `${g.home} - ${g.away}.jpg`
+        ).slice(0, 150),
+        blob,
+        {
+          compression: 'STORE'
+        }
+      );
+    }
+
+    const elapsed =
+      (performance.now() - started) /
+      1000;
+
+    setStatus(
+      `A gerar JPG ` +
+      `${Math.min(
+        i + batchSize,
+        state.games.length
+      )}/${state.games.length}... ` +
+      `${elapsed.toFixed(1)} s`
+    );
+
     if (elapsed > 30) {
-      setError('A geração ultrapassou 30 segundos. A causa provável é a codificação do JPEG/ZIP no navegador, não a pesquisa dos escudos.');
+      setError(
+        'A geração ultrapassou 30 segundos. ' +
+        'A causa provável é a codificação do JPEG/ZIP ' +
+        'no navegador, não a pesquisa dos escudos.'
+      );
+
       return;
     }
   }
 
-  const out = await zip.generateAsync({ type: 'blob', compression: 'STORE' });
-  const elapsed = (performance.now() - started) / 1000;
+  const out =
+    await zip.generateAsync({
+      type: 'blob',
+      compression: 'STORE'
+    });
+
+  const elapsed =
+    (performance.now() - started) /
+    1000;
+
   if (elapsed > 30) {
-    setError(`A geração terminou em ${elapsed.toFixed(1)} s. A demora ocorreu na criação do ZIP, porque os JPG já estavam gerados.`);
+    setError(
+      `A geração terminou em ${elapsed.toFixed(1)} s. ` +
+      'A demora ocorreu na criação do ZIP, ' +
+      'porque os JPG já estavam gerados.'
+    );
   }
-  download(out, 'Nomeacoes_Marques_Bom.zip');
-  setStatus(`Concluído: ${state.games.length} JPG(s) gerados em ${elapsed.toFixed(1)} s.`);
+
+  download(
+    out,
+    'Nomeacoes_Marques_Bom.zip'
+  );
+
+  setStatus(
+    `Concluído: ${state.games.length} JPG(s) ` +
+    `gerados em ${elapsed.toFixed(1)} s.`
+  );
 }
+
+
+/* =========================================================
+   GERAÇÃO MANUAL
+   ========================================================= */
 
 async function generateManual() {
-  const home = $('mHome').value.trim();
-  const away = $('mAway').value.trim();
-  const competition = $('mCompetition').value.trim();
-  if (!home || !away || !competition) return setError('Preenche competição e as duas equipas.');
+  const home =
+    $('mHome').value.trim();
 
-  const officials = [...document.querySelectorAll('.manualOfficial')]
-    .map(r => ({
-      name: r.querySelector('.mName').value.trim(),
-      role: r.querySelector('.mRole').value.trim() || 'Árbitro'
-    }))
-    .filter(x => x.name);
-  if (!officials.length) return setError('Adiciona pelo menos um oficial.');
+  const away =
+    $('mAway').value.trim();
 
-  const g = { home, away, competition, officials, date: $('mDate').value.trim() };
+  const competition =
+    $('mCompetition').value.trim();
+
+  if (
+    !home ||
+    !away ||
+    !competition
+  ) {
+    return setError(
+      'Preenche competição e as duas equipas.'
+    );
+  }
+
+  const officials =
+    [
+      ...document.querySelectorAll(
+        '.manualOfficial'
+      )
+    ]
+      .map(r => ({
+        name:
+          r.querySelector(
+            '.mName'
+          ).value.trim(),
+
+        role:
+          r.querySelector(
+            '.mRole'
+          ).value.trim() ||
+          'Árbitro'
+      }))
+      .filter(x => x.name);
+
+  if (!officials.length) {
+    return setError(
+      'Adiciona pelo menos um oficial.'
+    );
+  }
+
+  const g = {
+    home,
+    away,
+    competition,
+    officials,
+    date:
+      $('mDate').value.trim()
+  };
+
   await loadIdentity();
-  await Promise.all(officials.map(o => personImage(o.name)));
+
+  /*
+   * Fotografias.
+   */
+  await Promise.all(
+    officials.map(
+      o =>
+        personImage(o.name)
+    )
+  );
+
+  /*
+   * Escudos:
+   *
+   * local primeiro
+   * online depois
+   */
   await Promise.race([
     prefetchShields([g]),
-    new Promise(resolve => setTimeout(resolve, 12000))
+
+    new Promise(
+      resolve =>
+        setTimeout(
+          resolve,
+          12000
+        )
+    )
   ]);
 
-  const ok = await checkAssets([g]);
-  if (!ok) return;
+  const ok =
+    await checkAssets([g]);
 
-  const started = performance.now();
-  const canvas = render(g);
-  const blob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', .92));
-  const elapsed = (performance.now() - started) / 1000;
-  if (elapsed > 30) {
-    setError(`A nomeação manual demorou ${elapsed.toFixed(1)} s na codificação do JPG.`);
+  if (!ok) {
     return;
   }
-  download(blob, safeFile(`${home} - ${away}.jpg`));
-  setStatus(`Nomeação manual gerada em ${elapsed.toFixed(1)} s.`);
+
+  const started =
+    performance.now();
+
+  const canvas =
+    render(g);
+
+  const blob =
+    await new Promise(
+      r =>
+        canvas.toBlob(
+          r,
+          'image/jpeg',
+          .92
+        )
+    );
+
+  const elapsed =
+    (performance.now() - started) /
+    1000;
+
+  if (elapsed > 30) {
+    setError(
+      `A nomeação manual demorou ` +
+      `${elapsed.toFixed(1)} s na codificação do JPG.`
+    );
+
+    return;
+  }
+
+  download(
+    blob,
+    safeFile(
+      `${home} - ${away}.jpg`
+    )
+  );
+
+  setStatus(
+    `Nomeação manual gerada em ` +
+    `${elapsed.toFixed(1)} s.`
+  );
 }
 
-function download(blob, name) {
-  const u = URL.createObjectURL(blob);
-  const a = document.createElement('a');
+
+/* =========================================================
+   DOWNLOAD
+   ========================================================= */
+
+function download(
+  blob,
+  name
+) {
+  const u =
+    URL.createObjectURL(blob);
+
+  const a =
+    document.createElement('a');
 
   a.href = u;
   a.download = name;
 
   document.body.appendChild(a);
+
   a.click();
+
   a.remove();
 
-  setTimeout(() => URL.revokeObjectURL(u), 1500);
+  setTimeout(
+    () =>
+      URL.revokeObjectURL(u),
+    1500
+  );
 }
 
-function addManualOfficial(role = 'Árbitro') {
-  const row = document.createElement('div');
 
-  row.className = 'manualOfficial';
+/* =========================================================
+   OFICIAIS MANUAIS
+   ========================================================= */
+
+function addManualOfficial(
+  role = 'Árbitro'
+) {
+  const row =
+    document.createElement('div');
+
+  row.className =
+    'manualOfficial';
 
   row.innerHTML = `
-    <input class="mName" placeholder="Nome">
-    <input class="mRole" value="${escapeHtml(role)}">
-    <button type="button">×</button>
+    <input
+      class="mName"
+      placeholder="Nome"
+    >
+
+    <input
+      class="mRole"
+      value="${escapeHtml(role)}"
+    >
+
+    <button type="button">
+      ×
+    </button>
   `;
 
-  row.querySelector('button').onclick = () => row.remove();
+  row.querySelector(
+    'button'
+  ).onclick =
+    () => row.remove();
 
-  $('manualOfficials').appendChild(row);
+  $('manualOfficials')
+    .appendChild(row);
 }
+
+
+/* =========================================================
+   ROUTER
+   ========================================================= */
 
 function route() {
-  const manual = location.hash === '#manual';
+  const manual =
+    location.hash === '#manual';
 
-  $('pdfSection').hidden = manual;
-  $('manualSection').hidden = !manual;
+  $('pdfSection').hidden =
+    manual;
 
-  $('pdfBtn').classList.toggle('active', !manual);
-  $('manualBtn').classList.toggle('active', manual);
+  $('manualSection').hidden =
+    !manual;
+
+  $('pdfBtn').classList.toggle(
+    'active',
+    !manual
+  );
+
+  $('manualBtn').classList.toggle(
+    'active',
+    manual
+  );
 }
+
+
+/* =========================================================
+   INIT
+   ========================================================= */
 
 async function init() {
   await loadIdentity();
 
-  $('analyzeBtn').onclick = analyze;
-  $('generateBtn').onclick = generateAll;
+  $('analyzeBtn').onclick =
+    analyze;
 
-  $('pdfFile').onchange = e => {
-    $('fileName').textContent =
-      e.target.files[0]?.name || '';
-  };
+  $('generateBtn').onclick =
+    generateAll;
 
-  $('manualBtn').onclick = () => {
-    location.hash = '#manual';
-  };
+  $('pdfFile').onchange =
+    e => {
+      $('fileName').textContent =
+        e.target.files[0]?.name ||
+        '';
+    };
 
-  $('pdfBtn').onclick = () => {
-    location.hash = '#pdf';
-  };
+  $('manualBtn').onclick =
+    () => {
+      location.hash =
+        '#manual';
+    };
 
-  $('addOfficial').onclick = () => addManualOfficial();
+  $('pdfBtn').onclick =
+    () => {
+      location.hash =
+        '#pdf';
+    };
 
-  $('manualGenerate').onclick = generateManual;
+  $('addOfficial').onclick =
+    () =>
+      addManualOfficial();
+
+  $('manualGenerate').onclick =
+    generateManual;
 
   addManualOfficial();
 
-  window.onhashchange = route;
+  window.onhashchange =
+    route;
 
   route();
 }
