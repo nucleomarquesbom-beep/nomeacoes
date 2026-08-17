@@ -5,7 +5,7 @@ import JSZip from 'jszip';
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
 
 const $ = id => document.getElementById(id);
-const state = { pages: [], games: [], names: new Map(), assets: new Map() };
+const state = { pages: [], games: [], names: new Map(), assets: new Map(), shieldDb: new Map() };
 
 function normalizeText(v = '') {
   return String(v).toLowerCase()
@@ -456,7 +456,45 @@ async function loadFirst(key, urls) {
   return null;
 }
 
+async function loadShieldDatabase() {
+  state.shieldDb.clear();
+  try {
+    const r = await fetch('/escudos-db.json?v=1', { cache: 'no-store' });
+    if (!r.ok) return;
+    const data = await r.json();
+    const entries = Array.isArray(data)
+      ? data.map(x => [x.team || x.name, x.image || x.path || x.url])
+      : Object.entries(data || {});
+    for (const [team, value] of entries) {
+      if (!team || !value) continue;
+      const key = compact(team);
+      const searchKey = compact(teamVariants(team)[1] || team);
+      state.shieldDb.set(key, value);
+      state.shieldDb.set(searchKey, value);
+    }
+  } catch (e) {
+    console.warn('Base de dados de escudos indisponível:', e);
+  }
+}
+
+async function shieldFromDatabase(team) {
+  const variants = teamVariants(team);
+  for (const v of variants) {
+    const src = state.shieldDb.get(compact(v));
+    if (!src) continue;
+    const url = /^https?:\\/\\//i.test(src) || src.startsWith('/') ? src : `/${src.replace(/^\\//, '')}`;
+    const img = await tryImage(url);
+    if (img) {
+      state.assets.set('s:' + compact(team), img);
+      state.assets.set('source:' + compact(team), 'Base de dados de escudos');
+      return img;
+    }
+  }
+  return null;
+}
+
 async function loadIdentity() {
+  await loadShieldDatabase();
   await loadFirst('logo', [
     '/fotografias/logo.png',
     '/fotografias/logo.jpeg',
@@ -563,6 +601,8 @@ async function shieldLocalImage(team) {
 }
 
 async function prepareOneShield(team) {
+  // Priority: database -> local repository -> online search.
+  if (await shieldFromDatabase(team)) return true;
   if (await shieldLocalImage(team)) return true;
   return !!(await searchRemoteShield(team));
 }
@@ -726,36 +766,33 @@ function drawGoldLine(ctx, x1, y, x2) {
 }
 
 function drawTeamBlock(ctx, game, homeShield, awayShield) {
-  // Keep the two team areas completely separated from the central VS line.
-  const y = 505;
-  const leftCenter = 245;
-  const rightCenter = 835;
+  const y = 500;
+  const leftBox = { x: 70, w: 330, center: 235 };
+  const rightBox = { x: 680, w: 330, center: 845 };
 
   ctx.textAlign = 'center';
   ctx.fillStyle = '#e7b63d';
   ctx.font = '900 68px Arial';
-  ctx.fillText('VS', 540, y + 145);
+  ctx.fillText('VS', 540, y + 150);
 
   ctx.strokeStyle = 'rgba(231,182,61,.82)';
   ctx.lineWidth = 2;
   ctx.beginPath();
-  ctx.moveTo(385, y + 25); ctx.lineTo(385, y + 265);
-  ctx.moveTo(695, y + 25); ctx.lineTo(695, y + 265);
+  ctx.moveTo(390, y + 20); ctx.lineTo(390, y + 285);
+  ctx.moveTo(690, y + 20); ctx.lineTo(690, y + 285);
   ctx.stroke();
 
-  drawContain(ctx, homeShield, 120, y + 0, 250, 175);
-  drawContain(ctx, awayShield, 710, y + 0, 250, 175);
+  drawContain(ctx, homeShield, 105, y + 0, 260, 165);
+  drawContain(ctx, awayShield, 715, y + 0, 260, 165);
 
-  // Team names are kept inside their own columns so they can never cross
-  // the central separators.
   ctx.fillStyle = '#f5f7f8';
-  const homeSize = fit(ctx, game.home, 275, 31, 20);
+  const homeSize = fit(ctx, game.home, 285, 28, 18);
   ctx.font = `700 ${homeSize}px Arial`;
-  wrap(ctx, game.home, leftCenter, y + 205, 275, homeSize + 7, 2);
+  wrap(ctx, game.home, leftBox.center, y + 205, leftBox.w, homeSize + 5, 2);
 
-  const awaySize = fit(ctx, game.away, 275, 31, 20);
+  const awaySize = fit(ctx, game.away, 285, 28, 18);
   ctx.font = `700 ${awaySize}px Arial`;
-  wrap(ctx, game.away, rightCenter, y + 205, 275, awaySize + 7, 2);
+  wrap(ctx, game.away, rightBox.center, y + 205, rightBox.w, awaySize + 5, 2);
 }
 
 function drawMatchInfo(ctx, game) {
@@ -778,53 +815,58 @@ function drawMatchInfo(ctx, game) {
 }
 
 function drawOfficialCard(ctx, official, x, y, w, h) {
-  // New visual treatment: no dark card and no strip over the photograph.
-  // The referee photo is a straight Polaroid-style print, with the
-  // function/name information aligned cleanly to its right.
-  const photoW = Math.min(245, h * 0.82);
-  const photoH = Math.min(h - 20, photoW * 1.18);
-  const photoX = x + 18;
+  // Clean Polaroid layout: no dark card, no strip over the photo.
+  // The photograph is clipped to a fixed box and never escapes it.
+  const maxPhotoW = 235;
+  const maxPhotoH = Math.min(285, h - 22);
+  const photoW = Math.min(maxPhotoW, Math.max(125, h * 0.34));
+  const photoH = Math.min(maxPhotoH, photoW * 1.18);
+  const photoX = x + 25;
   const photoY = y + (h - photoH) / 2;
-  const frame = 12;
+  const frame = Math.max(8, Math.round(photoW * 0.055));
 
   ctx.save();
-  ctx.shadowColor = 'rgba(0,0,0,.30)';
-  ctx.shadowBlur = 14;
-  ctx.shadowOffsetY = 6;
+  ctx.shadowColor = 'rgba(0,0,0,.28)';
+  ctx.shadowBlur = 12;
+  ctx.shadowOffsetY = 5;
   ctx.fillStyle = '#f4f1e9';
   ctx.fillRect(photoX, photoY, photoW, photoH);
   ctx.restore();
 
   const photo = state.assets.get('p:' + compact(official.name)) || null;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(photoX + frame, photoY + frame, photoW - frame * 2, photoH - frame * 2);
+  ctx.clip();
   if (photo) {
     drawCover(ctx, photo, photoX + frame, photoY + frame, photoW - frame * 2, photoH - frame * 2, 0);
   } else {
     ctx.fillStyle = '#596b73';
     ctx.fillRect(photoX + frame, photoY + frame, photoW - frame * 2, photoH - frame * 2);
   }
+  ctx.restore();
 
-  const textX = photoX + photoW + 55;
-  const textW = x + w - textX - 25;
+  const textX = photoX + photoW + 38;
+  const textW = Math.max(300, x + w - textX - 20);
+  const centerY = y + h / 2;
+  const roleSize = Math.max(19, Math.min(30, h * 0.105));
+  const nameMax = Math.max(28, Math.min(55, h * 0.19));
+  const assocSize = Math.max(18, Math.min(27, h * 0.085));
 
   ctx.textAlign = 'left';
   ctx.fillStyle = '#e7b63d';
-  ctx.font = `700 ${Math.max(22, Math.min(34, h * 0.12))}px Arial`;
-  ctx.fillText(official.role.toUpperCase(), textX, y + h * 0.30);
+  ctx.font = `700 ${roleSize}px Arial`;
+  ctx.fillText(official.role.toUpperCase(), textX, centerY - roleSize * 1.45);
 
   ctx.fillStyle = '#f5f7f8';
-  const nameSize = fit(
-    ctx,
-    official.name.toUpperCase(),
-    textW,
-    Math.max(34, Math.min(62, h * 0.22)),
-    22
-  );
+  const nameSize = fit(ctx, official.name.toUpperCase(), textW, nameMax, 22);
   ctx.font = `900 ${nameSize}px Arial`;
-  wrap(ctx, official.name.toUpperCase(), textX, y + h * 0.54, textW, nameSize + 6, 2);
+  const nameLines = wrap(ctx, official.name.toUpperCase(), textX, centerY + nameSize * 0.25, textW, nameSize + 4, 2);
 
   ctx.fillStyle = '#e7b63d';
-  ctx.font = `700 ${Math.max(20, Math.min(29, h * 0.10))}px Arial`;
-  ctx.fillText('A.F. COIMBRA', textX, y + h * 0.78);
+  ctx.font = `700 ${assocSize}px Arial`;
+  const assocY = centerY + (nameLines * (nameSize + 4)) + assocSize * 1.15;
+  ctx.fillText('A.F. COIMBRA', textX, Math.min(y + h - assocSize, assocY));
 }
 
 function render(game) {
@@ -858,28 +900,37 @@ function render(game) {
   ctx.font = '700 23px Arial';
   ctx.fillText('COMPETIÇÃO', 540, 225);
 
-  // Draw the competition title as one centred unit, colouring only the final
-  // numeric part gold. This prevents the previous duplicated/offset title.
+  // Competition title is measured as a single unit, then drawn in two colours.
+  // This prevents long titles from overlapping or letters being drawn over each other.
   const titleY = 315;
   const match = comp.title.match(/^(.*?)(\d+)$/);
   if (match) {
     const left = match[1].trimEnd();
     const num = match[2];
-    ctx.font = '900 112px Arial';
-    const gap = 10;
-    const totalW = ctx.measureText(left).width + gap + ctx.measureText(num).width;
-    let tx = 540 - totalW / 2;
+    let size = 108;
+    let totalW = 0;
+    while (size > 48) {
+      ctx.font = `900 ${size}px Arial`;
+      totalW = ctx.measureText(left).width + 14 + ctx.measureText(num).width;
+      if (totalW <= 780) break;
+      size -= 2;
+    }
+    ctx.font = `900 ${size}px Arial`;
+    const leftW = ctx.measureText(left).width;
+    const numW = ctx.measureText(num).width;
+    const startX = 540 - (leftW + 14 + numW) / 2;
+    ctx.textAlign = 'left';
     ctx.fillStyle = '#f5f7f8';
-    ctx.fillText(left, tx + ctx.measureText(left).width / 2, titleY);
-    tx += ctx.measureText(left).width + gap;
+    ctx.fillText(left, startX, titleY);
     ctx.fillStyle = '#e7b63d';
-    ctx.fillText(num, tx + ctx.measureText(num).width / 2, titleY);
+    ctx.fillText(num, startX + leftW + 14, titleY);
   } else {
     ctx.fillStyle = '#f5f7f8';
-    const titleSize = fit(ctx, comp.title, 860, 108, 54);
+    const titleSize = fit(ctx, comp.title, 780, 96, 46);
     ctx.font = `900 ${titleSize}px Arial`;
     ctx.fillText(comp.title, 540, titleY);
   }
+  ctx.textAlign = 'center';
 
   drawGoldLine(ctx, 300, 365, 780);
   ctx.fillStyle = '#f5f7f8';
