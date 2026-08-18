@@ -62,7 +62,10 @@ export default async function handler(req, res) {
       });
   }
 
-  const { name, dataUrl } = parseBody(req);
+  const {
+    name,
+    dataUrl
+  } = parseBody(req);
 
   if (!name || !dataUrl) {
     return res
@@ -73,22 +76,22 @@ export default async function handler(req, res) {
       });
   }
 
-  const image = parseImageDataUrl(dataUrl);
+  const image =
+    parseImageDataUrl(dataUrl);
 
   if (!image) {
     return res
       .status(400)
       .json({
-        error: 'Imagem inválida.'
+        error:
+          'Imagem inválida. São aceites JPEG, PNG ou WEBP.'
       });
   }
 
   /*
-   * As fotografias processadas ficam numa pasta própria.
-   *
-   * Isto é importante porque as fotografias antigas
-   * podem continuar a existir em /fotografias, mas o
-   * gerador passa a procurar primeiro a versão recortada.
+   * As fotografias dos árbitros ficam na biblioteca
+   * principal. Não existe pasta "recortadas" porque
+   * não fazemos remoção de fundo nesta versão.
    */
   const filename =
     safeName(name) +
@@ -96,7 +99,7 @@ export default async function handler(req, res) {
     image.extension;
 
   const path =
-    `public/fotografias/recortadas/${filename}`;
+    `public/fotografias/${filename}`;
 
   const apiBase =
     `https://api.github.com/repos/${repo}/contents/` +
@@ -116,6 +119,10 @@ export default async function handler(req, res) {
   try {
     let sha;
 
+    /*
+     * Se a fotografia já existir, fazemos UPDATE.
+     * Assim não criamos ficheiros duplicados.
+     */
     const current =
       await fetch(
         `${apiBase}?ref=${encodeURIComponent(branch)}`,
@@ -144,19 +151,23 @@ export default async function handler(req, res) {
 
     const payload = {
       message:
-        `Guardar fotografia recortada: ${filename}`,
-      content: image.base64,
+        `Guardar fotografia: ${filename}`,
+      content:
+        image.base64,
       branch,
       ...(sha ? { sha } : {})
     };
 
     const put =
-      await fetch(apiBase, {
-        method: 'PUT',
-        headers,
-        body:
-          JSON.stringify(payload)
-      });
+      await fetch(
+        apiBase,
+        {
+          method: 'PUT',
+          headers,
+          body:
+            JSON.stringify(payload)
+        }
+      );
 
     const result =
       await put
@@ -184,12 +195,12 @@ export default async function handler(req, res) {
           null
       });
 
-  } catch (e) {
+  } catch (error) {
     return res
       .status(500)
       .json({
         error:
-          e?.message ||
+          error?.message ||
           'Erro ao guardar fotografia no GitHub.'
       });
   }
