@@ -1437,108 +1437,65 @@ function drawOfficialCard(
   h
 ) {
   /*
-   * CARTÃO FOTOGRÁFICO
-   *
-   * A fotografia continua a ser a fotografia original.
-   * Não existe remoção automática do fundo.
-   *
-   * A composição adapta-se ao espaço disponível:
-   * - cartões largos: fotografia dominante;
-   * - cartões pequenos: fotografia + faixa de texto compacta.
+   * Fotografia à esquerda.
    */
+  const photoW =
+    Math.min(
+      245,
+      h * 0.82
+    );
+
+  const photoH =
+    Math.min(
+      h - 20,
+      photoW * 1.18
+    );
+
+  const photoX =
+    x + 18;
+
+  const photoY =
+    y + (h - photoH) / 2;
+
+  const frame = 12;
+
+  /*
+   * Moldura da fotografia.
+   */
+  ctx.save();
+
+  ctx.shadowColor =
+    'rgba(0,0,0,.30)';
+
+  ctx.shadowBlur = 14;
+
+  ctx.shadowOffsetY = 6;
+
+  ctx.fillStyle =
+    '#f4f1e9';
+
+  ctx.fillRect(
+    photoX,
+    photoY,
+    photoW,
+    photoH
+  );
+
+  ctx.restore();
 
   const photo =
     state.assets.get(
       'p:' + compact(official.name)
     ) || null;
 
-  const radius =
-    Math.max(
-      14,
-      Math.round(
-        Math.min(w, h) * 0.025
-      )
-    );
-
-  const border =
-    Math.max(
-      8,
-      Math.round(
-        Math.min(w, h) * 0.018
-      )
-    );
-
-  /*
-   * A fotografia ocupa a maior parte do cartão.
-   * A faixa inferior fica reservada exclusivamente
-   * para a informação do oficial.
-   */
-  const textH =
-    Math.max(
-      92,
-      Math.min(
-        150,
-        h * 0.24
-      )
-    );
-
-  const photoX = x;
-  const photoY = y;
-  const photoW = w;
-  const photoH = h - textH;
-
-  /*
-   * Sombra discreta para separar o cartão do fundo.
-   */
-  ctx.save();
-
-  ctx.shadowColor =
-    'rgba(0,0,0,.34)';
-
-  ctx.shadowBlur = 18;
-  ctx.shadowOffsetY = 7;
-
-  roundRect(
-    ctx,
-    x,
-    y,
-    w,
-    h,
-    radius,
-    '#f4f1e9'
-  );
-
-  ctx.restore();
-
-  /*
-   * Fotografia.
-   *
-   * O recorte é feito apenas para preencher a área,
-   * mantendo a fotografia original. Não há remoção
-   * de fundo nem processamento de pessoa.
-   */
-  ctx.save();
-
-  ctx.beginPath();
-
-  ctx.roundRect(
-    photoX + border,
-    photoY + border,
-    photoW - border * 2,
-    photoH - border,
-    Math.max(8, radius - 4)
-  );
-
-  ctx.clip();
-
   if (photo) {
     drawCover(
       ctx,
       photo,
-      photoX + border,
-      photoY + border,
-      photoW - border * 2,
-      photoH - border,
+      photoX + frame,
+      photoY + frame,
+      photoW - frame * 2,
+      photoH - frame * 2,
       0
     );
   } else {
@@ -1546,90 +1503,78 @@ function drawOfficialCard(
       '#596b73';
 
     ctx.fillRect(
-      photoX + border,
-      photoY + border,
-      photoW - border * 2,
-      photoH - border
+      photoX + frame,
+      photoY + frame,
+      photoW - frame * 2,
+      photoH - frame * 2
     );
   }
 
-  ctx.restore();
-
   /*
-   * Pequena linha dourada entre fotografia e texto.
-   */
-  ctx.fillStyle =
-    '#e7b63d';
-
-  ctx.fillRect(
-    x + border,
-    photoY + photoH - 3,
-    w - border * 2,
-    6
-  );
-
-  /*
-   * FAIXA DE TEXTO
+   * ======================================================
+   * TEXTO AO LADO DA FOTOGRAFIA
+   * ======================================================
    *
-   * O lettering usa as mesmas cores da publicação:
-   * dourado para função e AF Coimbra;
-   * branco para o nome.
+   * Tudo fica no mesmo bloco:
+   *
+   * FUNÇÃO
+   *
+   * NOME
+   *
+   * A.F. COIMBRA
+   *
+   * Sem os grandes espaços verticais que existiam antes.
    */
-  const centerX =
-    x + w / 2;
 
-  const innerW =
-    w - border * 2 - 24;
+  const textX =
+    photoX +
+    photoW +
+    45;
 
-  const compactCard =
-    w < 500 || h < 430;
+  const textW =
+    x +
+    w -
+    textX -
+    25;
 
+  ctx.textAlign =
+    'left';
+
+  /*
+   * Tamanho da função.
+   */
   const roleSize =
-    compactCard
-      ? Math.max(
-          17,
-          Math.min(
-            23,
-            textH * 0.20
-          )
-        )
-      : Math.max(
-          21,
-          Math.min(
-            30,
-            textH * 0.22
-          )
-        );
+    Math.max(
+      20,
+      Math.min(
+        29,
+        h * 0.105
+      )
+    );
 
-  const nameStart =
-    compactCard
-      ? Math.max(
-          27,
-          Math.min(
-            42,
-            textH * 0.34
-          )
-        )
-      : Math.max(
-          34,
-          Math.min(
-            56,
-            textH * 0.39
-          )
-        );
-
-  const nameMin =
-    compactCard ? 18 : 22;
-
+  /*
+   * Tamanho do nome.
+   */
   const nameSize =
     fit(
       ctx,
       official.name.toUpperCase(),
-      innerW,
-      nameStart,
-      nameMin
+      textW,
+      Math.max(
+        34,
+        Math.min(
+          54,
+          h * 0.18
+        )
+      ),
+      22
     );
 
+  /*
+   * Calculamos primeiro as linhas do nome.
+   * Isto permite colocar A.F. COIMBRA logo depois,
+   * sem risco de sobreposição.
+   */
   ctx.font =
     `900 ${nameSize}px Arial`;
 
@@ -1637,58 +1582,37 @@ function drawOfficialCard(
     wrapLines(
       ctx,
       official.name.toUpperCase(),
-      innerW,
+      textW,
       2
     );
 
   const nameLineHeight =
-    nameSize +
-    (compactCard ? 2 : 5);
+    nameSize + 4;
 
-  const afSize =
-    compactCard
-      ? Math.max(
-          15,
-          Math.min(
-            20,
-            textH * 0.16
-          )
-        )
-      : Math.max(
-          17,
-          Math.min(
-            23,
-            textH * 0.17
-          )
-        );
+  /*
+   * Altura total do bloco.
+   */
+  const roleGap = 14;
+  const afterNameGap = 14;
 
-  const roleGap =
-    compactCard ? 5 : 8;
-
-  const nameGap =
-    compactCard ? 4 : 7;
-
-  const totalTextH =
+  const totalHeight =
     roleSize +
     roleGap +
     nameLines.length * nameLineHeight +
-    nameGap +
-    afSize;
+    afterNameGap +
+    26;
 
+  /*
+   * Começa verticalmente centrado
+   * relativamente à fotografia.
+   */
   let cursorY =
-    photoY +
-    photoH +
-    (
-      textH -
-      totalTextH
-    ) / 2;
+    y +
+    (h - totalHeight) / 2;
 
   /*
    * FUNÇÃO
    */
-  ctx.textAlign =
-    'center';
-
   ctx.fillStyle =
     '#e7b63d';
 
@@ -1697,7 +1621,7 @@ function drawOfficialCard(
 
   ctx.fillText(
     official.role.toUpperCase(),
-    centerX,
+    textX,
     cursorY + roleSize
   );
 
@@ -1709,7 +1633,7 @@ function drawOfficialCard(
    * NOME
    */
   ctx.fillStyle =
-    '#10222b';
+    '#f5f7f8';
 
   ctx.font =
     `900 ${nameSize}px Arial`;
@@ -1717,7 +1641,7 @@ function drawOfficialCard(
   for (const line of nameLines) {
     ctx.fillText(
       line,
-      centerX,
+      textX,
       cursorY + nameSize
     );
 
@@ -1726,11 +1650,20 @@ function drawOfficialCard(
   }
 
   cursorY +=
-    nameGap;
+    afterNameGap;
 
   /*
-   * ASSOCIAÇÃO
+   * A.F. COIMBRA
    */
+  const afSize =
+    Math.max(
+      18,
+      Math.min(
+        26,
+        h * 0.09
+      )
+    );
+
   ctx.fillStyle =
     '#e7b63d';
 
@@ -1739,13 +1672,11 @@ function drawOfficialCard(
 
   ctx.fillText(
     'A.F. COIMBRA',
-    centerX,
+    textX,
     cursorY + afSize
   );
-
-  ctx.textAlign =
-    'left';
 }
+
 
 /* =========================================================
    NOME DA COMPETIÇÃO
@@ -2230,17 +2161,16 @@ function render(game) {
    * ======================================================
    */
 
-  const officials =
-    game.officials
-      .slice(0, 4);
-
   const count =
     Math.max(
       1,
-      officials.length
+      Math.min(
+        game.officials.length,
+        4
+      )
     );
 
-  const top =
+  let top =
     (
       game.date ||
       game.matchDate ||
@@ -2255,142 +2185,43 @@ function render(game) {
   const bottom =
     1765;
 
-  /*
-   * A área de oficiais é composta de forma diferente
-   * consoante o número de fotografias.
-   *
-   * 1 → cartão grande e centrado
-   * 2 → 2 colunas
-   * 3 → 3 colunas
-   * 4 → grelha 2 x 2
-   *
-   * Isto evita a antiga divisão vertical "altura / count",
-   * que deixava 1 fotografia pequena e 4 fotografias
-   * demasiado comprimidas.
-   */
-  const areaX = 70;
-  const areaW = 940;
-  const areaH =
-    bottom - top;
-
   const gap =
-    count === 1
-      ? 0
-      : count === 2
-        ? 26
-        : count === 3
-          ? 18
-          : 24;
-
-  let columns;
-  let rows;
-
-  if (count === 1) {
-    columns = 1;
-    rows = 1;
-  } else if (count === 2) {
-    columns = 2;
-    rows = 1;
-  } else if (count === 3) {
-    columns = 3;
-    rows = 1;
-  } else {
-    columns = 2;
-    rows = 2;
-  }
-
-  const cardW =
-    Math.floor(
-      (
-        areaW -
-        gap * (columns - 1)
-      ) / columns
-    );
+    count >= 4
+      ? 10
+      : 16;
 
   const cardH =
     Math.floor(
       (
-        areaH -
-        gap * (rows - 1)
-      ) / rows
+        bottom -
+        top -
+        gap * (count - 1)
+      ) / count
     );
 
-  /*
-   * Para 1 fotografia usamos uma largura ligeiramente
-   * menor que a área total e centramos o cartão.
-   * Assim a fotografia tem presença sem esmagar o resto
-   * da publicação.
-   */
-  const singleW =
-    Math.min(
-      720,
-      areaW
-    );
+  const cardX =
+    95;
 
-  const singleH =
-    Math.min(
-      820,
-      areaH
-    );
+  const cardW =
+    890;
 
-  officials.forEach(
-    (official, i) => {
-      let x;
-      let y;
-      let w;
-      let h;
-
-      if (count === 1) {
-        w = singleW;
-        h = singleH;
-
-        x =
-          areaX +
-          (
-            areaW -
-            w
-          ) / 2;
-
-        y =
+  game.officials
+    .slice(0, 4)
+    .forEach(
+      (official, i) => {
+        drawOfficialCard(
+          ctx,
+          official,
+          cardX,
           top +
-          (
-            areaH -
-            h
-          ) / 2;
-
-      } else {
-        const col =
-          i % columns;
-
-        const row =
-          Math.floor(
-            i / columns
-          );
-
-        w = cardW;
-        h = cardH;
-
-        x =
-          areaX +
-          col *
-            (cardW + gap);
-
-        y =
-          top +
-          row *
-            (cardH + gap);
+            i *
+              (cardH + gap),
+          cardW,
+          cardH
+        );
       }
+    );
 
-      drawOfficialCard(
-        ctx,
-        official,
-        Math.round(x),
-        Math.round(y),
-        Math.round(w),
-        Math.round(h)
-      );
-    }
-  );
 
   /*
    * ======================================================
@@ -2675,53 +2506,19 @@ function renderMissing(items) {
           input.dataset.key
             .split('|');
 
-        const file =
-          input.files[0];
-
         const img =
           await fileToImage(
-            file
+            input.files[0]
           );
 
-        if (type === 'foto') {
-          /*
-           * A fotografia fica imediatamente disponível
-           * nesta sessão.
-           */
-          state.assets.set(
-            'p:' + compact(key),
-            img
-          );
-
-          /*
-           * E é guardada permanentemente no GitHub.
-           * Se o GitHub/Vercel estiver indisponível,
-           * a publicação continua a poder ser gerada
-           * com a fotografia desta sessão.
-           */
-          const saved =
-            await savePhotoToLibrary(
-              key,
-              file
-            );
-
-          if (!saved) {
-            console.warn(
-              `A fotografia de ${key} foi carregada nesta sessão, ` +
-              'mas não foi possível guardá-la na biblioteca.'
-            );
-          }
-        } else if (type === 'escudo') {
-          state.assets.set(
-            's:' + compact(key),
-            img
-          );
-        } else {
-          state.assets.set(
-            'logo',
-            img
-          );
-        }
+        state.assets.set(
+          type === 'foto'
+            ? 'p:' + compact(key)
+            : type === 'escudo'
+              ? 's:' + compact(key)
+              : 'logo',
+          img
+        );
       }
 
       setStatus(
@@ -2755,183 +2552,6 @@ function fileToImage(file) {
       img.src = u;
     }
   );
-}
-
-
-/* =========================================================
-   GUARDAR FOTOGRAFIA NA BIBLIOTECA
-   ========================================================= */
-
-/*
- * As fotografias fornecidas pelo utilizador são guardadas
- * como JPEG otimizado na biblioteca do projeto.
- *
- * Não existe qualquer remoção de fundo.
- * A imagem original continua a ser usada na publicação.
- */
-async function fileToOptimizedDataUrl(file, maxSide = 1600) {
-  const img = await fileToImage(file);
-
-  const iw =
-    img.naturalWidth ||
-    img.width;
-
-  const ih =
-    img.naturalHeight ||
-    img.height;
-
-  if (!iw || !ih) {
-    throw new Error(
-      'A fotografia não tem dimensões válidas.'
-    );
-  }
-
-  const scale =
-    Math.min(
-      1,
-      maxSide / Math.max(iw, ih)
-    );
-
-  const canvas =
-    document.createElement('canvas');
-
-  canvas.width =
-    Math.max(
-      1,
-      Math.round(iw * scale)
-    );
-
-  canvas.height =
-    Math.max(
-      1,
-      Math.round(ih * scale)
-    );
-
-  const ctx =
-    canvas.getContext('2d', {
-      alpha: false
-    });
-
-  ctx.fillStyle =
-    '#ffffff';
-
-  ctx.fillRect(
-    0,
-    0,
-    canvas.width,
-    canvas.height
-  );
-
-  ctx.drawImage(
-    img,
-    0,
-    0,
-    canvas.width,
-    canvas.height
-  );
-
-  return canvas.toDataURL(
-    'image/jpeg',
-    0.90
-  );
-}
-
-async function fileToDataUrl(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-
-    reader.onload = () => resolve(String(reader.result || ''));
-    reader.onerror = () => reject(reader.error || new Error('Não foi possível ler o ficheiro.'));
-
-    reader.readAsDataURL(file);
-  });
-}
-
-async function saveShieldToLibrary(team, file) {
-  try {
-    const dataUrl = await fileToDataUrl(file);
-
-    const response = await fetch('/api/escudo', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Accept': 'application/json'
-      },
-      body: JSON.stringify({
-        team,
-        dataUrl
-      })
-    });
-
-    const data = await response.json().catch(() => ({}));
-
-    if (!response.ok || !data?.ok) {
-      throw new Error(
-        data?.error ||
-        `Erro ao guardar escudo (${response.status}).`
-      );
-    }
-
-    return data;
-  } catch (error) {
-    console.warn(
-      'Não foi possível guardar o escudo na biblioteca:',
-      error
-    );
-
-    return null;
-  }
-}
-
-async function savePhotoToLibrary(
-  name,
-  file
-) {
-  try {
-    const dataUrl =
-      await fileToOptimizedDataUrl(
-        file
-      );
-
-    const response =
-      await fetch(
-        '/api/foto',
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type':
-              'application/json',
-            'Accept':
-              'application/json'
-          },
-          body: JSON.stringify({
-            name,
-            dataUrl
-          })
-        }
-      );
-
-    const data =
-      await response
-        .json()
-        .catch(() => ({}));
-
-    if (!response.ok) {
-      throw new Error(
-        data?.error ||
-        `Erro ao guardar fotografia (${response.status}).`
-      );
-    }
-
-    return data;
-  } catch (error) {
-    console.warn(
-      'Não foi possível guardar a fotografia na biblioteca:',
-      error
-    );
-
-    return null;
-  }
 }
 
 
@@ -3245,6 +2865,124 @@ async function generateAll() {
 }
 
 
+
+/* =========================================================
+   ESCUDOS MANUAIS
+   ========================================================= */
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    if (!file) {
+      resolve(null);
+      return;
+    }
+
+    const reader = new FileReader();
+
+    reader.onload = () => resolve(
+      typeof reader.result === 'string'
+        ? reader.result
+        : null
+    );
+
+    reader.onerror = () =>
+      reject(
+        reader.error ||
+        new Error('Não foi possível ler o escudo.')
+      );
+
+    reader.readAsDataURL(file);
+  });
+}
+
+async function useManualShield(team, inputId) {
+  const input = $(inputId);
+  const file = input?.files?.[0];
+
+  if (!file) {
+    return null;
+  }
+
+  if (!/^image\/(png|jpeg|webp)$/i.test(file.type)) {
+    throw new Error(
+      `O ficheiro escolhido para "${team}" não é uma imagem PNG, JPG ou WEBP.`
+    );
+  }
+
+  const dataUrl = await readFileAsDataUrl(file);
+
+  if (!dataUrl) {
+    throw new Error(
+      `Não foi possível ler o escudo de "${team}".`
+    );
+  }
+
+  const img = await tryImage(dataUrl);
+
+  if (!img) {
+    throw new Error(
+      `O escudo escolhido para "${team}" não é uma imagem válida.`
+    );
+  }
+
+  const key = 's:' + compact(team);
+
+  /*
+   * O escudo manual tem prioridade absoluta nesta geração.
+   */
+  state.assets.set(key, img);
+  state.assets.set(
+    'source:' + compact(team),
+    'Escudo escolhido manualmente'
+  );
+
+  /*
+   * Guarda no GitHub através do endpoint que já existe.
+   *
+   * Se a gravação falhar, NÃO falha a nomeação:
+   * o escudo continua disponível nesta sessão.
+   */
+  try {
+    const response = await fetch('/api/escudo', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+      },
+      body: JSON.stringify({
+        team,
+        dataUrl
+      })
+    });
+
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+
+      console.warn(
+        'Não foi possível guardar o escudo manual no GitHub:',
+        team,
+        data?.error || response.statusText
+      );
+    } else {
+      const data = await response.json().catch(() => ({}));
+
+      console.info(
+        'Escudo manual guardado:',
+        team,
+        data?.path || ''
+      );
+    }
+  } catch (error) {
+    console.warn(
+      'Erro ao guardar escudo manual no GitHub:',
+      team,
+      error
+    );
+  }
+
+  return img;
+}
+
 /* =========================================================
    GERAÇÃO MANUAL
    ========================================================= */
@@ -3308,6 +3046,8 @@ async function generateManual() {
 
   /*
    * Fotografias.
+   *
+   * Mantém exatamente o fluxo existente.
    */
   await Promise.all(
     officials.map(
@@ -3317,67 +3057,83 @@ async function generateManual() {
   );
 
   /*
-   * Escudos.
+   * Escudos manuais:
    *
-   * Se o utilizador escolher manualmente um escudo,
-   * ele tem prioridade absoluta sobre a pesquisa automática.
-   * Fica disponível imediatamente nesta sessão e é também
-   * enviado para a biblioteca permanente do GitHub.
+   * Se o utilizador escolheu um ficheiro, ele tem prioridade
+   * sobre a biblioteca e sobre a pesquisa online.
+   *
+   * Se não escolheu, mantém-se o fluxo automático existente.
    */
-  const manualShieldFiles = [
-    ['mHomeShield', home],
-    ['mAwayShield', away]
-  ];
+  let manualHomeShield = false;
+  let manualAwayShield = false;
 
-  for (const [inputId, team] of manualShieldFiles) {
-    const file = $(inputId)?.files?.[0];
-    if (!file) continue;
+  try {
+    manualHomeShield =
+      !!(await useManualShield(
+        home,
+        'mHomeShield'
+      ));
 
-    try {
-      const img = await fileToImage(file);
-
-      state.assets.set(
-        's:' + compact(team),
-        img
-      );
-
-      state.assets.set(
-        'source:' + compact(team),
-        'Ficheiro escolhido manualmente'
-      );
-
-      const saved = await saveShieldToLibrary(team, file);
-
-      if (!saved) {
-        console.warn(
-          `O escudo de ${team} foi carregado nesta sessão, mas não foi possível guardá-lo na biblioteca.`
-        );
-      }
-    } catch (error) {
-      console.warn(
-        `Não foi possível carregar o escudo manual de ${team}:`,
-        error
-      );
-    }
+    manualAwayShield =
+      !!(await useManualShield(
+        away,
+        'mAwayShield'
+      ));
+  } catch (error) {
+    return setError(
+      error?.message ||
+      'Não foi possível carregar um dos escudos escolhidos.'
+    );
   }
 
   /*
-   * Escudos restantes:
-   * local primeiro, online depois.
-   * Os escudos escolhidos manualmente já estão no cache
-   * e por isso não serão substituídos pela pesquisa online.
+   * Só pesquisa automaticamente os escudos
+   * que NÃO foram escolhidos manualmente.
    */
-  await Promise.race([
-    prefetchShields([g]),
+  const automaticGame = {
+    ...g,
+    home:
+      manualHomeShield
+        ? '__MANUAL_HOME_SHIELD__'
+        : home,
+    away:
+      manualAwayShield
+        ? '__MANUAL_AWAY_SHIELD__'
+        : away
+  };
 
-    new Promise(
-      resolve =>
-        setTimeout(
-          resolve,
-          12000
-        )
-    )
-  ]);
+  /*
+   * Evita que os marcadores fictícios sejam procurados online.
+   */
+  const automaticGames = [];
+
+  if (!manualHomeShield || !manualAwayShield) {
+    automaticGames.push({
+      ...g,
+      home:
+        manualHomeShield
+          ? ''
+          : home,
+      away:
+        manualAwayShield
+          ? ''
+          : away
+    });
+  }
+
+  if (automaticGames.length) {
+    await Promise.race([
+      prefetchShields(automaticGames),
+
+      new Promise(
+        resolve =>
+          setTimeout(
+            resolve,
+            12000
+          )
+      )
+    ]);
+  }
 
   const ok =
     await checkAssets([g]);
