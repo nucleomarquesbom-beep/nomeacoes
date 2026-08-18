@@ -1,3 +1,5 @@
+import sharp from 'sharp';
+
 /*
  * Escudos — fonte oficial de validação: ZeroZero.pt
  *
@@ -277,25 +279,36 @@ function validateCandidate(query, candidate, facts) {
   return total;
 }
 
-
-async function zeroZeroReference(name) {
+async function zeroZero(name) {
   let best = null;
 
   for (const query of searchVariants(name)) {
     const html = await fetchZeroZeroSearch(query);
     if (!html) continue;
 
-    const candidates = extractTeamCandidates(html);
+    const candidates =
+      extractTeamCandidates(html);
 
     for (const candidate of candidates.slice(0, 20)) {
-      const teamHtml = await fetchZeroZeroTeam(candidate.href);
+      const teamHtml =
+        await fetchZeroZeroTeam(candidate.href);
+
       if (!teamHtml) continue;
 
-      const facts = extractTeamFacts(teamHtml);
-      const candidateScore =
-        validateCandidate(name, candidate, facts);
+      const facts =
+        extractTeamFacts(teamHtml);
 
-      if (!best || candidateScore > best.score) {
+      const candidateScore =
+        validateCandidate(
+          name,
+          candidate,
+          facts
+        );
+
+      if (
+        !best ||
+        candidateScore > best.score
+      ) {
         best = {
           score: candidateScore,
           candidate,
@@ -306,511 +319,660 @@ async function zeroZeroReference(name) {
     }
   }
 
-  if (!best || best.score < 500) return null;
+  if (!best || best.score < 500) {
+    return null;
+  }
+
+  const imageUrl =
+    extractOgImage(best.teamHtml);
+
+  if (!imageUrl) {
+    return null;
+  }
 
   /*
-   * O ZeroZero é usado aqui exclusivamente como referência
-   * de identidade. A imagem dele NÃO é usada para gerar
-   * a publicação.
+   * O URL da imagem tem de continuar a ser do ZeroZero.
+   * Não aceitamos redirecionar a pesquisa para outra fonte.
    */
+  const imageHost =
+    new URL(
+      imageUrl,
+      'https://www.zerozero.pt'
+    ).hostname;
+
+  if (
+    imageHost !== 'www.zerozero.pt' &&
+    !imageHost.endsWith('.zerozero.pt')
+  ) {
+    return null;
+  }
+
   return {
     score: best.score,
-    team:
-      best.facts.officialName ||
-      best.candidate.name,
+    url: new URL(
+      imageUrl,
+      'https://www.zerozero.pt'
+    ).href,
+    source: 'ZeroZero.pt',
+    team: best.facts.officialName || best.candidate.name,
     zerozeroUrl: best.candidate.href,
     city: best.facts.city || null,
-    association: best.facts.association || null,
-    referenceImageUrl: extractOgImage(best.teamHtml)
+    association: best.facts.association || null
   };
 }
 
-function sourceScore(query, canonical, candidate, context = '') {
-  const a = score(query, candidate, context);
-  const b = canonical
-    ? score(canonical, candidate, context)
-    : 0;
 
-  return Math.max(a, b);
-}
+/* =========================================================
+   COMPARAÇÃO DE ESCUDOS
+   ---------------------------------------------------------
+   O ZeroZero serve APENAS como referência visual.
+   As imagens podem ser obtidas de outras bases, mas só
+   aceitamos uma imagem que seja visualmente equivalente
+   ao escudo apresentado pelo ZeroZero.
+   ========================================================= */
 
-async function fetchJson(url, options = {}) {
+async function fetchImageBuffer(url, referer = '') {
   try {
-    const r = await fetch(url, {
-      ...options,
-      headers: {
-        Accept: 'application/json',
-        'User-Agent':
-          'Mozilla/5.0 (compatible; NAF-Marques-Bom/1.0)',
-        ...(options.headers || {})
-      }
-    });
-
-    if (!r.ok) return null;
-    return await r.json();
-  } catch {
-    return null;
-  }
-}
-
-/*
- * TheSportsDB
- * Fonte de imagem, não de validação.
- */
-async function searchSportsDB(name, canonical) {
-  const queries = searchVariants(name);
-  const results = [];
-
-  for (const query of queries) {
-    const url =
-      'https://www.thesportsdb.com/api/v1/json/123/searchteams.php?t=' +
-      encodeURIComponent(query);
-
-    const data = await fetchJson(url);
-
-    for (const team of data?.teams || []) {
-      const candidate =
-        team.strTeam ||
-        team.strTeamAlternate ||
-        '';
-
-      const context = [
-        team.strTeamAlternate,
-        team.strLeague,
-        team.strCountry,
-        team.strStadiumLocation
-      ].filter(Boolean).join(' ');
-
-      const teamScore =
-        sourceScore(
-          name,
-          canonical,
-          candidate,
-          context
-        );
-
-      const images = [
-        ['badge', team.strBadge],
-        ['logo', team.strLogo],
-        ['poster', team.strPoster]
-      ];
-
-      for (const [kind, url] of images) {
-        if (
-          typeof url === 'string' &&
-          /^https?:\/\//i.test(url)
-        ) {
-          results.push({
-            source: `TheSportsDB:${kind}`,
-            url,
-            team: candidate,
-            score: teamScore
-          });
-        }
-      }
-    }
-  }
-
-  return results;
-}
-
-/*
- * Wikidata
- *
- * P154 = logo, que é a propriedade preferida.
- * P18 (imagem) não é usada porque pode ser fotografia do clube.
- */
-async function searchWikidata(name, canonical) {
-  const queries = [
-    canonical,
-    ...searchVariants(name)
-  ];
-
-  const results = [];
-  const seen = new Set();
-
-  for (const query of [...new Set(queries.filter(Boolean))]) {
-    const searchUrl =
-      'https://www.wikidata.org/w/api.php?' +
-      new URLSearchParams({
-        action: 'wbsearchentities',
-        search: query,
-        language: 'pt',
-        uselang: 'pt',
-        format: 'json',
-        limit: '8'
-      }).toString();
-
-    const searchData = await fetchJson(searchUrl);
-
-    for (const item of searchData?.search || []) {
-      if (seen.has(item.id)) continue;
-      seen.add(item.id);
-
-      const dataUrl =
-        'https://www.wikidata.org/w/api.php?' +
-        new URLSearchParams({
-          action: 'wbgetentities',
-          ids: item.id,
-          props: 'labels|aliases|claims',
-          languages: 'pt|en',
-          format: 'json'
-        }).toString();
-
-      const entityData = await fetchJson(dataUrl);
-      const entity =
-        entityData?.entities?.[item.id];
-
-      if (!entity) continue;
-
-      const label =
-        entity.labels?.pt?.value ||
-        entity.labels?.en?.value ||
-        item.label ||
-        '';
-
-      const aliases = Object.values(
-        entity.aliases || {}
-      ).flat().map(x => x.value);
-
-      const context = [
-        entity.descriptions?.pt?.value,
-        entity.descriptions?.en?.value,
-        ...aliases
-      ].filter(Boolean).join(' ');
-
-      const teamScore =
-        sourceScore(
-          name,
-          canonical,
-          label,
-          context
-        );
-
-      if (teamScore < 500) continue;
-
-      const logos =
-        entity.claims?.P154 || [];
-
-      for (const claim of logos) {
-        const file =
-          claim?.mainsnak?.datavalue?.value;
-
-        if (!file) continue;
-
-        const title =
-          String(file).startsWith('File:')
-            ? String(file).slice(5)
-            : String(file);
-
-        const commonsUrl =
-          'https://commons.wikimedia.org/wiki/Special:Redirect/file/' +
-          encodeURIComponent(title);
-
-        results.push({
-          source: 'Wikidata P154',
-          url: commonsUrl,
-          team: label,
-          score: teamScore + 80
-        });
-      }
-    }
-  }
-
-  return results;
-}
-
-/*
- * Wikipedia / MediaWiki PageImages.
- *
- * Procuramos páginas em PT e EN e usamos a imagem principal
- * apenas quando a página corresponde ao clube validado.
- */
-async function searchWikipedia(name, canonical) {
-  const results = [];
-  const seen = new Set();
-
-  for (const lang of ['pt', 'en']) {
-    const query =
-      canonical || name;
-
-    const searchUrl =
-      `https://${lang}.wikipedia.org/w/api.php?` +
-      new URLSearchParams({
-        action: 'query',
-        list: 'search',
-        srsearch: query,
-        srnamespace: '0',
-        srlimit: '8',
-        format: 'json',
-        origin: '*'
-      }).toString();
-
-    const data =
-      await fetchJson(searchUrl);
-
-    for (const item of data?.query?.search || []) {
-      const title = item.title;
-      const key = `${lang}:${title}`;
-
-      if (seen.has(key)) continue;
-      seen.add(key);
-
-      const pageUrl =
-        `https://${lang}.wikipedia.org/w/api.php?` +
-        new URLSearchParams({
-          action: 'query',
-          prop: 'pageimages',
-          titles: title,
-          piprop: 'original|name',
-          format: 'json',
-          origin: '*'
-        }).toString();
-
-      const pageData =
-        await fetchJson(pageUrl);
-
-      const pages =
-        Object.values(
-          pageData?.query?.pages || {}
-        );
-
-      const page = pages[0];
-      const image =
-        page?.original?.source;
-
-      if (!image) continue;
-
-      const teamScore =
-        sourceScore(
-          name,
-          canonical,
-          title,
-          item.snippet || ''
-        );
-
-      if (teamScore < 600) continue;
-
-      results.push({
-        source: `Wikipedia ${lang}`,
-        url: image,
-        team: title,
-        score: teamScore
-      });
-    }
-  }
-
-  return results;
-}
-
-/*
- * Wikimedia Commons
- *
- * Procuramos ficheiros de escudo/logo e não apenas páginas
- * genéricas. É uma fonte adicional de imagens.
- */
-async function searchCommons(name, canonical) {
-  const results = [];
-
-  const queries = [
-    `${canonical || name} logo`,
-    `${canonical || name} crest`,
-    `${canonical || name} escudo`
-  ];
-
-  for (const query of [...new Set(queries)]) {
-    const url =
-      'https://commons.wikimedia.org/w/api.php?' +
-      new URLSearchParams({
-        action: 'query',
-        generator: 'search',
-        gsrsearch: query,
-        gsrnamespace: '6',
-        gsrlimit: '10',
-        prop: 'imageinfo',
-        iiprop: 'url|mime',
-        format: 'json',
-        origin: '*'
-      }).toString();
-
-    const data =
-      await fetchJson(url);
-
-    for (const page of Object.values(
-      data?.query?.pages || {}
-    )) {
-      const image =
-        page?.imageinfo?.[0];
-
-      if (!image?.url) continue;
-
-      const mime =
-        String(image.mime || '').toLowerCase();
-
-      if (
-        !['image/png', 'image/svg+xml', 'image/webp', 'image/jpeg']
-          .includes(mime)
-      ) {
-        continue;
-      }
-
-      const teamScore =
-        sourceScore(
-          name,
-          canonical,
-          page.title,
-          query
-        );
-
-      if (teamScore < 500) continue;
-
-      /*
-       * Reforço: ficheiros com termos típicos de escudo/logo
-       * recebem prioridade.
-       */
-      const filename =
-        normalize(page.title);
-
-      const logoBonus =
-        /(logo|crest|escudo|badge|emblem|brasao)/i.test(filename)
-          ? 80
-          : 0;
-
-      results.push({
-        source: 'Wikimedia Commons',
-        url: image.url,
-        team: page.title,
-        score: teamScore + logoBonus
-      });
-    }
-  }
-
-  return results;
-}
-
-async function imageToDataUrl(url) {
-  try {
-    const parsed = new URL(url);
-
-    if (parsed.protocol !== 'https:') {
-      return null;
-    }
-
     const r = await fetch(url, {
       headers: {
         Accept:
           'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*',
-        Referer:
-          'https://www.zerozero.pt/',
+        ...(referer ? { Referer: referer } : {}),
         'User-Agent':
           'Mozilla/5.0 (compatible; NAF-Marques-Bom/1.0)'
-      }
+      },
+      redirect: 'follow'
     });
 
     if (!r.ok) return null;
 
     const type =
-      (r.headers.get('content-type') || '')
-        .split(';')[0]
-        .toLowerCase();
+      (r.headers.get('content-type') || '').split(';')[0].toLowerCase();
 
-    if (!type.startsWith('image/')) {
-      return null;
-    }
-
-    const buffer =
-      Buffer.from(
-        await r.arrayBuffer()
-      );
+    const buffer = Buffer.from(await r.arrayBuffer());
 
     if (!buffer.length) return null;
 
-    return {
-      dataUrl:
-        `data:${type};base64,${buffer.toString('base64')}`,
-      type,
-      bytes: buffer.length
-    };
+    return { buffer, type };
   } catch {
     return null;
   }
 }
 
 /*
- * ZeroZero é a referência de identidade.
- * As imagens são recolhidas das bases disponíveis e
- * ordenadas pela correspondência com essa referência.
+ * Normaliza o escudo:
+ * - fundo branco;
+ * - corta margens;
+ * - mantém proporção;
+ * - transforma em grelha pequena de cinzentos.
+ *
+ * Isto permite comparar o desenho do escudo mesmo que:
+ * - uma base tenha PNG e outra JPG;
+ * - o tamanho seja diferente;
+ * - exista transparência;
+ * - o fundo seja diferente.
  */
-async function findBestShield(name) {
-  const reference =
-    await zeroZeroReference(name);
+async function shieldSignature(buffer) {
+  try {
+    const image = sharp(buffer, {
+      failOn: 'none'
+    });
 
-  if (!reference) {
+    const processed =
+      await image
+        .rotate()
+        .flatten({ background: '#ffffff' })
+        .trim({
+          background: '#ffffff',
+          threshold: 18
+        })
+        .resize(48, 48, {
+          fit: 'contain',
+          background: '#ffffff'
+        })
+        .grayscale()
+        .normalize()
+        .raw()
+        .toBuffer({ resolveWithObject: true });
+
+    return {
+      data: processed.data,
+      width: processed.info.width,
+      height: processed.info.height
+    };
+  } catch {
+    return null;
+  }
+}
+
+function signatureSimilarity(a, b) {
+  if (!a || !b || a.data.length !== b.data.length) {
+    return 0;
+  }
+
+  let sumA = 0;
+  let sumB = 0;
+
+  for (let i = 0; i < a.data.length; i++) {
+    sumA += a.data[i];
+    sumB += b.data[i];
+  }
+
+  const meanA = sumA / a.data.length;
+  const meanB = sumB / b.data.length;
+
+  let numerator = 0;
+  let denomA = 0;
+  let denomB = 0;
+  let mse = 0;
+
+  for (let i = 0; i < a.data.length; i++) {
+    const da = a.data[i] - meanA;
+    const db = b.data[i] - meanB;
+
+    numerator += da * db;
+    denomA += da * da;
+    denomB += db * db;
+
+    const diff = a.data[i] - b.data[i];
+    mse += diff * diff;
+  }
+
+  if (!denomA || !denomB) {
+    return 0;
+  }
+
+  const correlation =
+    numerator /
+    Math.sqrt(denomA * denomB);
+
+  const rmse =
+    Math.sqrt(mse / a.data.length) / 255;
+
+  /*
+   * Correlação mede o desenho; RMSE impede que duas imagens
+   * demasiado diferentes sejam aceites só por coincidência.
+   *
+   * A regra é deliberadamente conservadora.
+   */
+  const corrScore =
+    Math.max(0, Math.min(1, (correlation + 1) / 2));
+
+  const pixelScore =
+    Math.max(0, Math.min(1, 1 - rmse));
+
+  return (
+    corrScore * 0.75 +
+    pixelScore * 0.25
+  );
+}
+
+async function compareShieldBuffers(referenceBuffer, candidateBuffer) {
+  if (!referenceBuffer || !candidateBuffer) {
+    return {
+      equal: false,
+      similarity: 0
+    };
+  }
+
+  /*
+   * Se forem exatamente os mesmos bytes, não há qualquer
+   * dúvida: é o mesmo ficheiro.
+   */
+  if (
+    referenceBuffer.length === candidateBuffer.length &&
+    referenceBuffer.equals(candidateBuffer)
+  ) {
+    return {
+      equal: true,
+      similarity: 1
+    };
+  }
+
+  const reference =
+    await shieldSignature(referenceBuffer);
+
+  const candidate =
+    await shieldSignature(candidateBuffer);
+
+  const similarity =
+    signatureSimilarity(reference, candidate);
+
+  /*
+   * 0.90 é intencionalmente conservador. Se uma imagem
+   * não passar, preferimos pedir carregamento manual a
+   * publicar o escudo errado.
+   */
+  return {
+    equal: similarity >= 0.90,
+    similarity
+  };
+}
+
+
+/* =========================================================
+   FONTES DE CANDIDATOS
+   ========================================================= */
+
+function candidateScore(query, candidate) {
+  const q = normalize(query);
+  const c = normalize(candidate);
+
+  if (!q || !c) return -9999;
+
+  let value = 0;
+
+  if (q === c) value += 1000;
+  if (q.includes(c) || c.includes(q)) value += 450;
+
+  const qt = new Set(tokens(query));
+  const ct = new Set(tokens(candidate));
+
+  let common = 0;
+
+  for (const token of qt) {
+    if (ct.has(token)) {
+      common++;
+      value += 180;
+    }
+  }
+
+  if (common === qt.size && qt.size > 0) {
+    value += 450;
+  }
+
+  return value - Math.abs(q.length - c.length);
+}
+
+function sourceVariants(name, canonical = '') {
+  const values = [
+    canonical,
+    name,
+    cleanName(canonical),
+    cleanName(name)
+  ];
+
+  return [
+    ...new Set(
+      values
+        .map(x => String(x || '').trim())
+        .filter(Boolean)
+    )
+  ];
+}
+
+async function searchTheSportsDB(name, canonical) {
+  const out = [];
+
+  for (const query of sourceVariants(name, canonical)) {
+    try {
+      const url =
+        'https://www.thesportsdb.com/api/v1/json/3/searchteams.php?t=' +
+        encodeURIComponent(query);
+
+      const r = await fetch(url, {
+        headers: {
+          Accept: 'application/json',
+          'User-Agent':
+            'Mozilla/5.0 (compatible; NAF-Marques-Bom/1.0)'
+        }
+      });
+
+      if (!r.ok) continue;
+
+      const data = await r.json().catch(() => null);
+
+      for (const team of data?.teams || []) {
+        const image =
+          team?.strTeamBadge ||
+          team?.strTeamLogo ||
+          null;
+
+        if (!image) continue;
+
+        out.push({
+          source: 'TheSportsDB',
+          name: team?.strTeam || '',
+          url: image,
+          score: candidateScore(
+            canonical || name,
+            team?.strTeam || ''
+          )
+        });
+      }
+    } catch {
+      // próxima fonte
+    }
+  }
+
+  return out;
+}
+
+async function searchWikidata(name, canonical) {
+  const out = [];
+
+  for (const query of sourceVariants(name, canonical)) {
+    try {
+      const url =
+        'https://www.wikidata.org/w/api.php?action=wbsearchentities' +
+        '&search=' + encodeURIComponent(query) +
+        '&language=pt&uselang=pt&format=json&limit=8';
+
+      const r = await fetch(url, {
+        headers: {
+          Accept: 'application/json',
+          'User-Agent':
+            'Mozilla/5.0 (compatible; NAF-Marques-Bom/1.0)'
+        }
+      });
+
+      if (!r.ok) continue;
+
+      const data = await r.json().catch(() => null);
+
+      for (const item of data?.search || []) {
+        const id = item?.id;
+        if (!id) continue;
+
+        const entityUrl =
+          'https://www.wikidata.org/wiki/Special:EntityData/' +
+          encodeURIComponent(id) +
+          '.json';
+
+        const er = await fetch(entityUrl, {
+          headers: {
+            Accept: 'application/json',
+            'User-Agent':
+              'Mozilla/5.0 (compatible; NAF-Marques-Bom/1.0)'
+          }
+        });
+
+        if (!er.ok) continue;
+
+        const entityData =
+          await er.json().catch(() => null);
+
+        const entity =
+          entityData?.entities?.[id];
+
+        const claims =
+          entity?.claims?.P154 || [];
+
+        for (const claim of claims) {
+          const filename =
+            claim?.mainsnak?.datavalue?.value;
+
+          if (!filename) continue;
+
+          out.push({
+            source: 'Wikidata P154',
+            name:
+              item?.label ||
+              canonical ||
+              name,
+            url:
+              'https://commons.wikimedia.org/wiki/Special:Redirect/file/' +
+              encodeURIComponent(filename),
+            score: candidateScore(
+              canonical || name,
+              item?.label || ''
+            )
+          });
+        }
+      }
+    } catch {
+      // próxima variante
+    }
+  }
+
+  return out;
+}
+
+async function searchWikipedia(name, canonical, lang) {
+  const out = [];
+
+  for (const query of sourceVariants(name, canonical)) {
+    try {
+      const url =
+        `https://${lang}.wikipedia.org/w/api.php?` +
+        'action=query&generator=search&gsrnamespace=0' +
+        '&gsrlimit=8&prop=pageimages|info&piprop=original' +
+        '&inprop=url&format=json&gsrsearch=' +
+        encodeURIComponent(query);
+
+      const r = await fetch(url, {
+        headers: {
+          Accept: 'application/json',
+          'User-Agent':
+            'Mozilla/5.0 (compatible; NAF-Marques-Bom/1.0)'
+        }
+      });
+
+      if (!r.ok) continue;
+
+      const data = await r.json().catch(() => null);
+
+      for (const page of Object.values(data?.query?.pages || {})) {
+        const image =
+          page?.original?.source;
+
+        if (!image) continue;
+
+        out.push({
+          source: `Wikipedia ${lang}`,
+          name: page?.title || '',
+          url: image,
+          score: candidateScore(
+            canonical || name,
+            page?.title || ''
+          )
+        });
+      }
+    } catch {
+      // próxima fonte
+    }
+  }
+
+  return out;
+}
+
+async function searchCommons(name, canonical) {
+  const out = [];
+
+  for (const query of sourceVariants(name, canonical)) {
+    try {
+      const search =
+        `${query} logo OR crest OR escudo OR badge`;
+
+      const url =
+        'https://commons.wikimedia.org/w/api.php?' +
+        'action=query&generator=search&gsrnamespace=6' +
+        '&gsrlimit=10&prop=imageinfo&iiprop=url' +
+        '&iiurlwidth=800&format=json&gsrsearch=' +
+        encodeURIComponent(search);
+
+      const r = await fetch(url, {
+        headers: {
+          Accept: 'application/json',
+          'User-Agent':
+            'Mozilla/5.0 (compatible; NAF-Marques-Bom/1.0)'
+        }
+      });
+
+      if (!r.ok) continue;
+
+      const data = await r.json().catch(() => null);
+
+      for (const page of Object.values(data?.query?.pages || {})) {
+        const image =
+          page?.imageinfo?.[0]?.thumburl ||
+          page?.imageinfo?.[0]?.url;
+
+        if (!image) continue;
+
+        out.push({
+          source: 'Wikimedia Commons',
+          name: page?.title || '',
+          url: image,
+          score: candidateScore(
+            canonical || name,
+            page?.title || ''
+          )
+        });
+      }
+    } catch {
+      // próxima fonte
+    }
+  }
+
+  return out;
+}
+
+async function findMatchingExternalShield(
+  team,
+  reference
+) {
+  if (!reference?.url) return null;
+
+  const referenceImage =
+    await fetchImageBuffer(
+      reference.url,
+      'https://www.zerozero.pt/'
+    );
+
+  if (!referenceImage) {
     return null;
   }
 
   const canonical =
-    reference.team;
+    reference.team ||
+    team;
 
-  const settled =
-    await Promise.allSettled([
-      searchSportsDB(name, canonical),
-      searchWikidata(name, canonical),
-      searchWikipedia(name, canonical),
-      searchCommons(name, canonical)
-    ]);
-
-  const candidates =
-    settled.flatMap(
-      result =>
-        result.status === 'fulfilled'
-          ? result.value
-          : []
-    );
+  const candidates = (
+    await Promise.all([
+      searchTheSportsDB(team, canonical),
+      searchWikidata(team, canonical),
+      searchWikipedia(team, canonical, 'pt'),
+      searchWikipedia(team, canonical, 'en'),
+      searchCommons(team, canonical)
+    ])
+  ).flat();
 
   /*
-   * Remover URLs duplicados e ordenar pela confiança.
+   * Primeiro os candidatos com maior correspondência de nome.
+   * Depois, entre eles, a comparação visual decide.
    */
-  const unique = [];
-  const seen = new Set();
-
-  for (const candidate of candidates.sort(
+  candidates.sort(
     (a, b) => b.score - a.score
-  )) {
-    if (seen.has(candidate.url)) continue;
-    seen.add(candidate.url);
-    unique.push(candidate);
-  }
+  );
 
-  /*
-   * Só aceitamos candidatos suficientemente próximos
-   * do clube confirmado pelo ZeroZero.
-   */
-  const acceptable =
-    unique.filter(
-      candidate => candidate.score >= 580
-    );
+  const tested = new Set();
 
-  for (const candidate of acceptable.slice(0, 12)) {
+  for (const candidate of candidates.slice(0, 30)) {
+    if (!candidate.url || tested.has(candidate.url)) {
+      continue;
+    }
+
+    tested.add(candidate.url);
+
     const image =
-      await imageToDataUrl(candidate.url);
+      await fetchImageBuffer(candidate.url);
 
     if (!image) continue;
 
-    return {
-      image,
-      source: candidate.source,
-      team: canonical,
-      sourceTeam: candidate.team,
-      score: candidate.score,
-      zerozeroUrl: reference.zerozeroUrl,
-      zerozeroScore: reference.score,
-      city: reference.city,
-      association: reference.association
-    };
+    const comparison =
+      await compareShieldBuffers(
+        referenceImage.buffer,
+        image.buffer
+      );
+
+    if (comparison.equal) {
+      return {
+        ...candidate,
+        similarity: comparison.similarity,
+        buffer: image.buffer,
+        type:
+          image.type ||
+          'image/png'
+      };
+    }
   }
 
   return null;
+}
+
+
+async function imageToDataUrl(url) {
+  const r = await fetch(url, {
+    headers: {
+      Accept: 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*',
+      Referer: 'https://www.zerozero.pt/',
+      'User-Agent': 'Mozilla/5.0 (compatible; NAF-Marques-Bom/1.0)'
+    }
+  });
+
+  if (!r.ok) return null;
+
+  const type =
+    (r.headers.get('content-type') || 'image/png')
+      .split(';')[0]
+      .toLowerCase();
+
+  if (
+    !type.startsWith('image/')
+  ) {
+    return null;
+  }
+
+  const buffer =
+    Buffer.from(
+      await r.arrayBuffer()
+    );
+
+  if (!buffer.length) return null;
+
+  return {
+    dataUrl:
+      `data:${type};base64,${buffer.toString('base64')}`,
+    type
+  };
+}
+
+function parseBody(req) {
+  if (
+    req.body &&
+    typeof req.body === 'object'
+  ) {
+    return req.body;
+  }
+
+  try {
+    return JSON.parse(
+      req.body || '{}'
+    );
+  } catch {
+    return {};
+  }
+}
+
+function parseImageDataUrl(dataUrl) {
+  const match =
+    String(dataUrl || '')
+      .match(
+        /^data:image\/(png|jpeg|jpg|webp);base64,(.+)$/i
+      );
+
+  if (!match) return null;
+
+  const ext =
+    match[1].toLowerCase() === 'jpeg'
+      ? 'jpg'
+      : match[1].toLowerCase();
+
+  return {
+    extension: ext,
+    base64: match[2]
+  };
 }
 
 async function saveShieldToGitHub(
@@ -1025,43 +1187,78 @@ export default async function handler(
   }
 
   try {
-    const result =
-      await findBestShield(raw);
+    /*
+     * PRIMEIRO: ZeroZero é apenas a referência para saber
+     * qual é o clube e qual é o escudo correto.
+     */
+    const reference =
+      await zeroZero(raw);
 
-    if (!result) {
+    if (!reference) {
       return res
         .status(404)
         .json({
           error:
-            'O clube não foi confirmado no ZeroZero.pt ou não foi encontrada uma imagem válida nas bases de dados disponíveis.'
+            'Não foi possível confirmar a equipa no ZeroZero.pt.'
         });
     }
 
+    /*
+     * DEPOIS: procurar o mesmo escudo noutras bases.
+     * Só aceitamos uma imagem se a comparação visual
+     * com o ZeroZero passar o limiar de segurança.
+     */
+    const match =
+      await findMatchingExternalShield(
+        raw,
+        reference
+      );
+
+    if (!match) {
+      return res
+        .status(404)
+        .json({
+          error:
+            'A equipa foi confirmada no ZeroZero, mas nenhuma das bases consultadas devolveu um escudo visualmente igual. O escudo deve ser carregado manualmente.',
+          zerozeroUrl:
+            reference.zerozeroUrl
+        });
+    }
+
+    const type =
+      match.type || 'image/png';
+
+    const dataUrl =
+      `data:${type};base64,${match.buffer.toString('base64')}`;
+
+    /*
+     * Publica apenas depois da comparação positiva.
+     */
     const saved =
       await saveShieldToGitHub(
         raw,
-        result.image.dataUrl
+        dataUrl
       );
 
     return res
       .status(200)
       .json({
         imageDataUrl:
-          result.image.dataUrl,
+          dataUrl,
         source:
-          result.source,
+          match.source,
         team:
-          result.team,
-        sourceTeam:
-          result.sourceTeam,
+          reference.team,
         zerozeroUrl:
-          result.zerozeroUrl,
+          reference.zerozeroUrl,
         city:
-          result.city,
+          reference.city,
         association:
-          result.association,
+          reference.association,
         score:
-          result.score,
+          reference.score,
+        similarity:
+          match.similarity,
         saved:
           !!saved.ok,
         savedPath:
@@ -1074,7 +1271,7 @@ export default async function handler(
 
   } catch (error) {
     console.error(
-      'Erro na pesquisa de escudo:',
+      'Erro na pesquisa/comparação do escudo:',
       error
     );
 
