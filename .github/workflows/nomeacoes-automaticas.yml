@@ -1,57 +1,44 @@
 name: Nomeações FPF automáticas
-
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 20 * * *'
-      timezone: 'Europe/Lisbon'
-
+    - cron: '0 18,19,20 * * *'
 permissions:
   contents: write
-
 concurrency:
   group: nomeacoes-fpf-automaticas
   cancel-in-progress: false
-
 jobs:
   gerar-e-enviar:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-
+    timeout-minutes: 25
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
-
       - name: Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
-
       - name: Instalar Playwright
         working-directory: automation
         run: |
           npm init -y
           npm install --no-save playwright@1.55.0
           npx playwright install --with-deps chromium
-
       - name: Executar automatismo
         env:
           APP_URL: ${{ secrets.APP_URL }}
           EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           EMAIL_TO: nucleomarquesbom@gmail.com
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
         run: node automation/run.js
-
       - name: Guardar estado
-        if: success()
+        if: success() && github.event_name == 'schedule'
         run: |
-          if git diff --quiet -- automation/last-processed.json; then
-            echo "Sem alteração no estado."
-            exit 0
-          fi
-
+          if git diff --quiet -- automation/last-processed.json; then exit 0; fi
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add automation/last-processed.json
