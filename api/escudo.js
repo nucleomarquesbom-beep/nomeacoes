@@ -120,20 +120,26 @@ function parseBody(req) {
   try { return JSON.parse(req.body || '{}'); } catch { return {}; }
 }
 
-async function saveShield(req, res) {
+function parseImageDataUrl(dataUrl) {
+  const match = String(dataUrl || '').match(/^data:image\/(png|jpeg|jpg|webp);base64,(.+)$/i);
+  if (!match) return null;
+  const ext = match[1].toLowerCase() === 'jpeg' ? 'jpg' : match[1].toLowerCase();
+  return { extension: ext, base64: match[2] };
+}
+
+async function saveShieldToGitHub(team, dataUrl) {
   const token = process.env.GITHUB_TOKEN;
   const repo = process.env.GITHUB_REPO;
   const branch = process.env.GITHUB_BRANCH || 'main';
-  if (!token || !repo) return res.status(500).json({ error: 'GITHUB_TOKEN ou GITHUB_REPO não configurado no Vercel.' });
 
-  const { team, dataUrl } = parseBody(req);
-  if (!team || !dataUrl) return res.status(400).json({ error: 'team e dataUrl são obrigatórios.' });
+  if (!token || !repo) {
+    return { ok: false, error: 'GITHUB_TOKEN ou GITHUB_REPO não configurado no Vercel.' };
+  }
 
-  const match = String(dataUrl).match(/^data:image\/(png|jpeg|jpg|webp);base64,(.+)$/i);
-  if (!match) return res.status(400).json({ error: 'Imagem inválida.' });
+  const image = parseImageDataUrl(dataUrl);
+  if (!image) return { ok: false, error: 'Imagem inválida.' };
 
-  const ext = match[1].toLowerCase() === 'jpeg' ? 'jpg' : match[1].toLowerCase();
-  const filename = safeName(team) + '.' + ext;
+  const filename = safeName(team) + '.' + image.extension;
   const path = `public/escudos/${filename}`;
   const apiBase = `https://api.github.com/repos/${repo}/contents/${encodeURIComponent(path).replace(/%2F/g, '/')}`;
   const headers = {
@@ -146,25 +152,65 @@ async function saveShield(req, res) {
   try {
     let sha;
     const current = await fetch(`${apiBase}?ref=${encodeURIComponent(branch)}`, { headers });
-    if (current.ok) sha = (await current.json()).sha;
-    else if (current.status !== 404) return res.status(current.status).json({ error: `GitHub GET falhou: ${(await current.text()).slice(0, 500)}` });
+
+    if (current.ok) {
+      const currentData = await current.json();
+      sha = currentData?.sha;
+    } else if (current.status !== 404) {
+      const detail = await current.text().catch(() => '');
+      return { ok: false, error: `GitHub GET falhou: ${detail.slice(0, 500)}` };
+    }
+
+    const payload = {
+      message: `Adicionar escudo: ${filename}`,
+      content: image.base64,
+      branch,
+      ...(sha ? { sha } : {})
+    };
 
     const put = await fetch(apiBase, {
       method: 'PUT',
       headers,
-      body: JSON.stringify({
-        message: `Adicionar escudo: ${filename}`,
-        content: match[2],
-        branch,
-        ...(sha ? { sha } : {})
-      })
+      body: JSON.stringify(payload)
     });
+
     const result = await put.json().catch(() => ({}));
-    if (!put.ok) return res.status(put.status).json({ error: result?.message || `GitHub PUT falhou (${put.status})` });
-    return res.status(200).json({ ok: true, path, url: `/${path}`, commit: result?.commit?.sha || null });
-  } catch (e) {
-    return res.status(500).json({ error: e?.message || 'Erro ao guardar escudo no GitHub.' });
+
+    if (!put.ok) {
+      return {
+        ok: false,
+        error: result?.message || `GitHub PUT falhou (${put.status})`
+      };
+    }
+
+    return {
+      ok: true,
+      path,
+      commit: result?.commit?.sha || null
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error?.message || 'Erro ao guardar escudo no GitHub.'
+    };
   }
+}
+
+async function saveShield(req, res) {
+  const { team, dataUrl } = parseBody(req);
+  if (!team || !dataUrl) {
+    return res.status(400).json({ error: 'team e dataUrl são obrigatórios.' });
+  }
+
+  const result = await saveShieldToGitHub(team, dataUrl);
+  if (!result.ok) return res.status(500).json({ error: result.error });
+
+  return res.status(200).json({
+    ok: true,
+    path: result.path,
+    url: `/${result.path}`,
+    commit: result.commit
+  });
 }
 
 export default async function handler(req, res) {
@@ -177,8 +223,21 @@ export default async function handler(req, res) {
   try {
     const result = await findShield(raw);
     if (!result) return res.status(404).json({ error: 'Escudo não encontrado' });
-    return res.status(200).json(result);
-  } catch (e) {
-    return res.status(500).json({ error: e?.message || 'Erro na pesquisa do escudo' });
+
+    /*
+     * O próprio servidor guarda o escudo depois de o encontrar.
+     * Isto é mais robusto do que devolver uma data URL enorme ao
+     * browser e pedir-lhe para a reenviar num segundo POST.
+     */
+    const saved = await saveShieldToGitHub(raw, result.imageDataUrl);
+
+    return res.status(200).json({
+      ...result,
+      saved: !!saved.ok,
+      savedPath: saved.path || null,
+      saveError: saved.ok ? null : saved.error
+    });
+  } catch (error) {
+    return res.status(500).json({ error: error?.message || 'Erro na pesquisa do escudo' });
   }
 }
