@@ -1856,126 +1856,90 @@ function drawCompetitionTitle(
   comp
 ) {
   const centerX = 540;
-  const safeWidth = 820;
-
-  ctx.textAlign = 'center';
-  ctx.fillStyle = '#e7b63d';
-  ctx.font = '700 23px Arial';
-
-  ctx.fillText(
-    'COMPETIÇÃO',
-    centerX,
-    225
-  );
-
-  const titleY = 315;
+  const safeWidth = 900;
 
   /*
-   * O título principal é sempre medido como um bloco.
-   * Isto evita que "LIGA 3", "LIGA PLACARD", etc.
-   * ultrapassem a área útil da publicação.
+   * O título ocupa uma área própria.
+   * Não mostramos "COMPETIÇÃO": o nome da competição é
+   * directamente o elemento principal.
+   *
+   * Títulos longos são automaticamente divididos em
+   * duas linhas. O tamanho é reduzido apenas o necessário
+   * para manter as duas linhas dentro da publicação.
    */
-  const match = comp.title.match(/^(.*?)(\d+)$/);
+  const title = String(comp?.title || '').trim();
 
-  if (match) {
-    const left = match[1].trimEnd();
-    const num = match[2];
-    const gap = 10;
+  if (title) {
+    let size = 108;
+    let lines = [];
 
-    let size = fit(
-      ctx,
-      `${left} ${num}`,
-      safeWidth,
-      108,
-      52
-    );
-
-    while (size > 52) {
+    while (size >= 48) {
       ctx.font = `900 ${size}px Arial`;
+      lines = wrapLines(ctx, title, safeWidth, 2);
 
-      const total =
-        ctx.measureText(left).width +
-        gap +
-        ctx.measureText(num).width;
+      if (lines.length <= 2) {
+        break;
+      }
 
-      if (total <= safeWidth) break;
       size -= 2;
     }
 
-    ctx.font = `900 ${size}px Arial`;
+    /*
+     * Se uma palavra isolada for demasiado comprida,
+     * dividimo-la por caracteres em vez de a deixar sair
+     * da área da publicação.
+     */
+    if (lines.length > 2) {
+      ctx.font = `900 48px Arial`;
+      lines = wrapLongText(ctx, title, safeWidth, 2);
+    }
 
-    const leftW = ctx.measureText(left).width;
-    const numW = ctx.measureText(num).width;
-    const totalW = leftW + gap + numW;
-
-    let x = centerX - totalW / 2;
-
-    ctx.textAlign = 'left';
-    ctx.fillStyle = '#f5f7f8';
-    ctx.fillText(left, x, titleY);
-
-    x += leftW + gap;
-
-    ctx.fillStyle = '#e7b63d';
-    ctx.fillText(num, x, titleY);
-
-  } else {
-    const titleSize = fit(
-      ctx,
-      comp.title,
-      safeWidth,
-      108,
-      52
-    );
+    const lineHeight = Math.round(size * 0.88);
+    const firstY =
+      lines.length === 1
+        ? 315
+        : 292;
 
     ctx.textAlign = 'center';
-    ctx.font = `900 ${titleSize}px Arial`;
     ctx.fillStyle = '#f5f7f8';
+    ctx.font = `900 ${size}px Arial`;
 
-    ctx.fillText(
-      comp.title,
-      centerX,
-      titleY
-    );
+    lines.forEach((line, index) => {
+      ctx.fillText(
+        line,
+        centerX,
+        firstY + index * lineHeight
+      );
+    });
   }
+
+  /*
+   * A linha dourada fica abaixo do título, quer este tenha
+   * uma ou duas linhas.
+   */
+  const lineY =
+    title && wrapLines(
+      ctx,
+      title,
+      safeWidth,
+      2
+    ).length > 1
+      ? 380
+      : 355;
 
   drawGoldLine(
     ctx,
     300,
-    365,
+    lineY,
     780
   );
 
   if (comp.detail) {
     const detailMaxWidth = 850;
-    let detailSize = fit(
-      ctx,
-      comp.detail,
-      detailMaxWidth,
-      25,
-      15
-    );
+    let detailSize = 25;
+    let lines = [];
 
-    ctx.font = `700 ${detailSize}px Arial`;
-    ctx.textAlign = 'center';
-    ctx.fillStyle = '#f5f7f8';
-
-    let lines = wrapLines(
-      ctx,
-      comp.detail,
-      detailMaxWidth,
-      2
-    );
-
-    /*
-     * Se o detalhe precisar de mais de duas linhas,
-     * reduzimos o tamanho até caber em duas.
-     */
-    while (
-      lines.length > 2 &&
-      detailSize > 15
-    ) {
-      detailSize -= 1;
+    while (detailSize >= 15) {
       ctx.font = `700 ${detailSize}px Arial`;
       lines = wrapLines(
         ctx,
@@ -1983,13 +1947,30 @@ function drawCompetitionTitle(
         detailMaxWidth,
         2
       );
+
+      if (lines.length <= 2) break;
+      detailSize -= 1;
     }
+
+    if (lines.length > 2) {
+      ctx.font = '700 15px Arial';
+      lines = wrapLongText(
+        ctx,
+        comp.detail,
+        detailMaxWidth,
+        2
+      );
+    }
+
+    ctx.font = `700 ${detailSize}px Arial`;
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#f5f7f8';
 
     const lineHeight = detailSize + 5;
     const startY =
       lines.length === 1
-        ? 415
-        : 400;
+        ? lineY + 48
+        : lineY + 38;
 
     lines.forEach((line, index) => {
       ctx.fillText(
@@ -2001,6 +1982,80 @@ function drawCompetitionTitle(
   }
 
   ctx.textAlign = 'left';
+}
+
+/*
+ * Wrap normal por palavras, mas sem truncar silenciosamente.
+ */
+function wrapLongText(
+  ctx,
+  text,
+  maxWidth,
+  maxLines = 2
+) {
+  const words = String(text || '')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+
+  const lines = [];
+  let current = '';
+
+  for (const word of words) {
+    const candidate =
+      current
+        ? `${current} ${word}`
+        : word;
+
+    if (
+      ctx.measureText(candidate).width <=
+      maxWidth
+    ) {
+      current = candidate;
+      continue;
+    }
+
+    if (current) {
+      lines.push(current);
+      current = '';
+    }
+
+    /*
+     * Palavra individual demasiado comprida:
+     * divide por caracteres para garantir que nunca
+     * ultrapassa a largura útil.
+     */
+    let chunk = '';
+
+    for (const char of word) {
+      const candidateChar = chunk + char;
+
+      if (
+        ctx.measureText(candidateChar).width <=
+        maxWidth
+      ) {
+        chunk = candidateChar;
+      } else {
+        if (chunk) lines.push(chunk);
+        chunk = char;
+      }
+    }
+
+    current = chunk;
+
+    if (lines.length >= maxLines) break;
+  }
+
+  if (current && lines.length < maxLines) {
+    lines.push(current);
+  }
+
+  /*
+   * Se ainda houver mais texto do que duas linhas,
+   * reduzimos a última linha apenas ao conteúdo que
+   * realmente cabe, sem permitir overflow.
+   */
+  return lines.slice(0, maxLines);
 }
 
 
