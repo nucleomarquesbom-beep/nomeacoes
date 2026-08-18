@@ -2836,6 +2836,53 @@ async function fileToOptimizedDataUrl(file, maxSide = 1600) {
   );
 }
 
+async function fileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(reader.error || new Error('Não foi possível ler o ficheiro.'));
+
+    reader.readAsDataURL(file);
+  });
+}
+
+async function saveShieldToLibrary(team, file) {
+  try {
+    const dataUrl = await fileToDataUrl(file);
+
+    const response = await fetch('/api/escudo', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+      },
+      body: JSON.stringify({
+        team,
+        dataUrl
+      })
+    });
+
+    const data = await response.json().catch(() => ({}));
+
+    if (!response.ok || !data?.ok) {
+      throw new Error(
+        data?.error ||
+        `Erro ao guardar escudo (${response.status}).`
+      );
+    }
+
+    return data;
+  } catch (error) {
+    console.warn(
+      'Não foi possível guardar o escudo na biblioteca:',
+      error
+    );
+
+    return null;
+  }
+}
+
 async function savePhotoToLibrary(
   name,
   file
@@ -3270,10 +3317,55 @@ async function generateManual() {
   );
 
   /*
-   * Escudos:
+   * Escudos.
    *
-   * local primeiro
-   * online depois
+   * Se o utilizador escolher manualmente um escudo,
+   * ele tem prioridade absoluta sobre a pesquisa automática.
+   * Fica disponível imediatamente nesta sessão e é também
+   * enviado para a biblioteca permanente do GitHub.
+   */
+  const manualShieldFiles = [
+    ['mHomeShield', home],
+    ['mAwayShield', away]
+  ];
+
+  for (const [inputId, team] of manualShieldFiles) {
+    const file = $(inputId)?.files?.[0];
+    if (!file) continue;
+
+    try {
+      const img = await fileToImage(file);
+
+      state.assets.set(
+        's:' + compact(team),
+        img
+      );
+
+      state.assets.set(
+        'source:' + compact(team),
+        'Ficheiro escolhido manualmente'
+      );
+
+      const saved = await saveShieldToLibrary(team, file);
+
+      if (!saved) {
+        console.warn(
+          `O escudo de ${team} foi carregado nesta sessão, mas não foi possível guardá-lo na biblioteca.`
+        );
+      }
+    } catch (error) {
+      console.warn(
+        `Não foi possível carregar o escudo manual de ${team}:`,
+        error
+      );
+    }
+  }
+
+  /*
+   * Escudos restantes:
+   * local primeiro, online depois.
+   * Os escudos escolhidos manualmente já estão no cache
+   * e por isso não serão substituídos pela pesquisa online.
    */
   await Promise.race([
     prefetchShields([g]),
