@@ -621,6 +621,27 @@ function personUrls(name) {
 
   const urls = [];
 
+  /*
+   * A versão recortada tem prioridade absoluta.
+   * Se já existir, nunca voltamos a usar a fotografia
+   * original durante a composição.
+   */
+  for (const f of variants) {
+    for (const ext of [
+      'webp',
+      'png',
+      'jpg',
+      'jpeg'
+    ]) {
+      urls.push(
+        `/fotografias/recortadas/${encodeURIComponent(f)}.${ext}`
+      );
+    }
+  }
+
+  /*
+   * Compatibilidade com a biblioteca antiga.
+   */
   for (const f of variants) {
     for (const ext of [
       'jpg',
@@ -648,6 +669,141 @@ async function personImage(name) {
     key,
     personUrls(name)
   );
+}
+
+/*
+ * Guarda uma fotografia já processada na biblioteca persistente.
+ *
+ * A API usa o token GitHub no servidor, nunca no browser.
+ * Se o GitHub/Vercel estiver temporariamente indisponível,
+ * a imagem continua disponível nesta sessão.
+ */
+async function saveProcessedPhoto(name, dataUrl) {
+  if (!dataUrl) return false;
+
+  try {
+    const response = await fetch(
+      '/api/foto',
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
+        body: JSON.stringify({
+          name,
+          dataUrl
+        })
+      }
+    );
+
+    if (!response.ok) {
+      const detail =
+        await response.text().catch(() => '');
+
+      console.warn(
+        'Não foi possível guardar a fotografia:',
+        name,
+        detail
+      );
+
+      return false;
+    }
+
+    return true;
+
+  } catch (error) {
+    console.warn(
+      'Erro ao guardar fotografia:',
+      name,
+      error
+    );
+
+    return false;
+  }
+}
+
+async function processAndStorePhoto(
+  name,
+  file
+) {
+  if (!file) return null;
+
+  try {
+    const {
+      removeBackground
+    } = await import(
+      './photo-processing.js'
+    );
+
+    const result =
+      await removeBackground(file);
+
+    if (!result?.dataUrl) {
+      throw new Error(
+        'A remoção do fundo não devolveu uma imagem válida.'
+      );
+    }
+
+    const img =
+      await tryImage(result.dataUrl);
+
+    if (!img) {
+      throw new Error(
+        'A fotografia processada não pôde ser carregada.'
+      );
+    }
+
+    state.assets.set(
+      'p:' + compact(name),
+      img
+    );
+
+    /*
+     * Persistência. Não bloqueia a utilização da
+     * fotografia se a gravação remota falhar.
+     */
+    const saved =
+      await saveProcessedPhoto(
+        name,
+        result.dataUrl
+      );
+
+    return {
+      img,
+      saved
+    };
+
+  } catch (error) {
+    console.error(
+      'Falha no processamento da fotografia:',
+      name,
+      error
+    );
+
+    /*
+     * Fallback seguro: se a remoção automática falhar,
+     * ainda utilizamos a fotografia original nesta sessão.
+     */
+    try {
+      const img =
+        await fileToImage(file);
+
+      state.assets.set(
+        'p:' + compact(name),
+        img
+      );
+
+      return {
+        img,
+        saved: false,
+        fallback: true
+      };
+
+    } catch {
+      return null;
+    }
+  }
 }
 
 
@@ -1439,12 +1595,16 @@ function drawOfficialCard(
   /*
    * CARTÃO FOTOGRÁFICO
    *
-   * A fotografia continua a ser a fotografia original.
-   * Não existe remoção automática do fundo.
+   * A fotografia original é usada sem remoção de fundo.
+   * O cartão mantém a fotografia na zona superior e a
+   * identificação fica sempre por baixo.
    *
-   * A composição adapta-se ao espaço disponível:
-   * - cartões largos: fotografia dominante;
-   * - cartões pequenos: fotografia + faixa de texto compacta.
+   * Esta é a composição que estava correta:
+   * - fotografia dominante;
+   * - função em dourado;
+   * - nome em escuro;
+   * - A.F. COIMBRA em dourado;
+   * - sem texto ao lado da fotografia.
    */
 
   const photo =
@@ -1469,9 +1629,8 @@ function drawOfficialCard(
     );
 
   /*
-   * A fotografia ocupa a maior parte do cartão.
    * A faixa inferior fica reservada exclusivamente
-   * para a informação do oficial.
+   * para função + nome + associação.
    */
   const textH =
     Math.max(
@@ -1487,9 +1646,7 @@ function drawOfficialCard(
   const photoW = w;
   const photoH = h - textH;
 
-  /*
-   * Sombra discreta para separar o cartão do fundo.
-   */
+  /* Sombra/moldura exterior. */
   ctx.save();
 
   ctx.shadowColor =
@@ -1513,9 +1670,9 @@ function drawOfficialCard(
   /*
    * Fotografia.
    *
-   * O recorte é feito apenas para preencher a área,
-   * mantendo a fotografia original. Não há remoção
-   * de fundo nem processamento de pessoa.
+   * Não removemos o fundo e não alteramos a fotografia.
+   * Apenas fazemos o recorte "cover" para preencher a
+   * área fotográfica do cartão.
    */
   ctx.save();
 
@@ -1555,9 +1712,7 @@ function drawOfficialCard(
 
   ctx.restore();
 
-  /*
-   * Pequena linha dourada entre fotografia e texto.
-   */
+  /* Linha dourada entre fotografia e identificação. */
   ctx.fillStyle =
     '#e7b63d';
 
@@ -1569,11 +1724,7 @@ function drawOfficialCard(
   );
 
   /*
-   * FAIXA DE TEXTO
-   *
-   * O lettering usa as mesmas cores da publicação:
-   * dourado para função e AF Coimbra;
-   * branco para o nome.
+   * IDENTIFICAÇÃO
    */
   const centerX =
     x + w / 2;
@@ -1621,10 +1772,15 @@ function drawOfficialCard(
   const nameMin =
     compactCard ? 18 : 22;
 
+  const nameText =
+    String(
+      official.name || ''
+    ).toUpperCase();
+
   const nameSize =
     fit(
       ctx,
-      official.name.toUpperCase(),
+      nameText,
       innerW,
       nameStart,
       nameMin
@@ -1636,7 +1792,7 @@ function drawOfficialCard(
   const nameLines =
     wrapLines(
       ctx,
-      official.name.toUpperCase(),
+      nameText,
       innerW,
       2
     );
@@ -1696,7 +1852,9 @@ function drawOfficialCard(
     `700 ${roleSize}px Arial`;
 
   ctx.fillText(
-    official.role.toUpperCase(),
+    String(
+      official.role || 'Árbitro'
+    ).toUpperCase(),
     centerX,
     cursorY + roleSize
   );
@@ -1856,209 +2014,232 @@ function drawCompetitionTitle(
   comp
 ) {
   const centerX = 540;
-  const safeWidth = 900;
 
   /*
-   * O título ocupa uma área própria.
-   * Não mostramos "COMPETIÇÃO": o nome da competição é
-   * directamente o elemento principal.
-   *
-   * Títulos longos são automaticamente divididos em
-   * duas linhas. O tamanho é reduzido apenas o necessário
-   * para manter as duas linhas dentro da publicação.
+   * A área útil é deliberadamente menor que o canvas.
+   * Assim o lettering nunca toca os limites da publicação
+   * nem o logótipo/elementos do fundo.
    */
-  const title = String(comp?.title || '').trim();
+  const safeWidth = 820;
 
-  if (title) {
-    let size = 108;
-    let lines = [];
+  ctx.textAlign =
+    'center';
 
-    while (size >= 48) {
-      ctx.font = `900 ${size}px Arial`;
-      lines = wrapLines(ctx, title, safeWidth, 2);
+  ctx.fillStyle =
+    '#e7b63d';
 
-      if (lines.length <= 2) {
+  ctx.font =
+    '700 23px Arial';
+
+  ctx.fillText(
+    'COMPETIÇÃO',
+    centerX,
+    225
+  );
+
+  /*
+   * TÍTULO PRINCIPAL
+   *
+   * Quando termina em número (ex.: LIGA 3), mantemos
+   * o número dourado. A largura é calculada antes de
+   * desenhar e o tamanho é reduzido automaticamente.
+   */
+  const titleY = 315;
+
+  const match =
+    String(comp.title || '')
+      .trim()
+      .match(/^(.*?)(\d+)$/);
+
+  if (match) {
+    const left =
+      match[1].trimEnd();
+
+    const num =
+      match[2];
+
+    const gap = 10;
+
+    let titleSize = 112;
+
+    while (titleSize > 54) {
+      ctx.font =
+        `900 ${titleSize}px Arial`;
+
+      const leftW =
+        ctx.measureText(left).width;
+
+      const numW =
+        ctx.measureText(num).width;
+
+      if (
+        leftW +
+        gap +
+        numW <=
+        safeWidth
+      ) {
         break;
       }
 
-      size -= 2;
+      titleSize -= 2;
     }
 
-    /*
-     * Se uma palavra isolada for demasiado comprida,
-     * dividimo-la por caracteres em vez de a deixar sair
-     * da área da publicação.
-     */
-    if (lines.length > 2) {
-      ctx.font = `900 48px Arial`;
-      lines = wrapLongText(ctx, title, safeWidth, 2);
-    }
+    ctx.font =
+      `900 ${titleSize}px Arial`;
 
-    const lineHeight = Math.round(size * 0.88);
-    const firstY =
-      lines.length === 1
-        ? 315
-        : 292;
+    const leftW =
+      ctx.measureText(left).width;
 
-    ctx.textAlign = 'center';
-    ctx.fillStyle = '#f5f7f8';
-    ctx.font = `900 ${size}px Arial`;
+    const numW =
+      ctx.measureText(num).width;
 
-    lines.forEach((line, index) => {
-      ctx.fillText(
-        line,
-        centerX,
-        firstY + index * lineHeight
+    const totalW =
+      leftW +
+      gap +
+      numW;
+
+    let x =
+      centerX -
+      totalW / 2;
+
+    ctx.textAlign =
+      'left';
+
+    ctx.fillStyle =
+      '#f5f7f8';
+
+    ctx.fillText(
+      left,
+      x,
+      titleY
+    );
+
+    x +=
+      leftW +
+      gap;
+
+    ctx.fillStyle =
+      '#e7b63d';
+
+    ctx.fillText(
+      num,
+      x,
+      titleY
+    );
+
+  } else {
+    const titleSize =
+      fit(
+        ctx,
+        String(comp.title || ''),
+        safeWidth,
+        108,
+        48
       );
-    });
-  }
 
-  /*
-   * A linha dourada fica abaixo do título, quer este tenha
-   * uma ou duas linhas.
-   */
-  const lineY =
-    title && wrapLines(
-      ctx,
-      title,
-      safeWidth,
-      2
-    ).length > 1
-      ? 380
-      : 355;
+    ctx.textAlign =
+      'center';
+
+    ctx.font =
+      `900 ${titleSize}px Arial`;
+
+    ctx.fillStyle =
+      '#f5f7f8';
+
+    ctx.fillText(
+      String(comp.title || ''),
+      centerX,
+      titleY
+    );
+  }
 
   drawGoldLine(
     ctx,
     300,
-    lineY,
+    365,
     780
   );
 
+  /*
+   * DETALHE DA COMPETIÇÃO
+   *
+   * O detalhe pode ocupar até duas linhas. Em vez de
+   * deixar o texto sair da publicação, medimos a largura
+   * e reduzimos o lettering progressivamente.
+   */
   if (comp.detail) {
-    const detailMaxWidth = 850;
-    let detailSize = 25;
+    let detailSize =
+      Math.min(
+        25,
+        Math.max(
+          15,
+          fit(
+            ctx,
+            comp.detail,
+            safeWidth,
+            25,
+            15
+          )
+        )
+      );
+
     let lines = [];
 
     while (detailSize >= 15) {
-      ctx.font = `700 ${detailSize}px Arial`;
-      lines = wrapLines(
-        ctx,
-        comp.detail,
-        detailMaxWidth,
-        2
-      );
+      ctx.font =
+        `700 ${detailSize}px Arial`;
 
-      if (lines.length <= 2) break;
+      lines =
+        wrapLines(
+          ctx,
+          comp.detail,
+          safeWidth,
+          2
+        );
+
+      if (
+        lines.length <= 2 &&
+        lines.every(
+          line =>
+            ctx.measureText(line).width <=
+            safeWidth
+        )
+      ) {
+        break;
+      }
+
       detailSize -= 1;
     }
 
-    if (lines.length > 2) {
-      ctx.font = '700 15px Arial';
-      lines = wrapLongText(
-        ctx,
-        comp.detail,
-        detailMaxWidth,
-        2
-      );
-    }
+    ctx.font =
+      `700 ${detailSize}px Arial`;
 
-    ctx.font = `700 ${detailSize}px Arial`;
-    ctx.textAlign = 'center';
-    ctx.fillStyle = '#f5f7f8';
+    ctx.textAlign =
+      'center';
 
-    const lineHeight = detailSize + 5;
+    ctx.fillStyle =
+      '#f5f7f8';
+
+    const lineHeight =
+      detailSize + 6;
+
     const startY =
       lines.length === 1
-        ? lineY + 48
-        : lineY + 38;
+        ? 415
+        : 405;
 
-    lines.forEach((line, index) => {
-      ctx.fillText(
-        line,
-        centerX,
-        startY + index * lineHeight
-      );
-    });
-  }
-
-  ctx.textAlign = 'left';
-}
-
-/*
- * Wrap normal por palavras, mas sem truncar silenciosamente.
- */
-function wrapLongText(
-  ctx,
-  text,
-  maxWidth,
-  maxLines = 2
-) {
-  const words = String(text || '')
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean);
-
-  const lines = [];
-  let current = '';
-
-  for (const word of words) {
-    const candidate =
-      current
-        ? `${current} ${word}`
-        : word;
-
-    if (
-      ctx.measureText(candidate).width <=
-      maxWidth
-    ) {
-      current = candidate;
-      continue;
-    }
-
-    if (current) {
-      lines.push(current);
-      current = '';
-    }
-
-    /*
-     * Palavra individual demasiado comprida:
-     * divide por caracteres para garantir que nunca
-     * ultrapassa a largura útil.
-     */
-    let chunk = '';
-
-    for (const char of word) {
-      const candidateChar = chunk + char;
-
-      if (
-        ctx.measureText(candidateChar).width <=
-        maxWidth
-      ) {
-        chunk = candidateChar;
-      } else {
-        if (chunk) lines.push(chunk);
-        chunk = char;
+    lines.forEach(
+      (line, index) => {
+        ctx.fillText(
+          line,
+          centerX,
+          startY +
+            index * lineHeight
+        );
       }
-    }
-
-    current = chunk;
-
-    if (lines.length >= maxLines) break;
+    );
   }
-
-  if (current && lines.length < maxLines) {
-    lines.push(current);
-  }
-
-  /*
-   * Se ainda houver mais texto do que duas linhas,
-   * reduzimos a última linha apenas ao conteúdo que
-   * realmente cabe, sem permitir overflow.
-   */
-  return lines.slice(0, maxLines);
 }
-
-
 
 /* =========================================================
    RENDER FINAL
@@ -2275,8 +2456,7 @@ function render(game) {
    */
 
   const officials =
-    game.officials
-      .slice(0, 4);
+    game.officials.slice(0, 4);
 
   const count =
     Math.max(
@@ -2299,142 +2479,147 @@ function render(game) {
   const bottom =
     1765;
 
-  /*
-   * A área de oficiais é composta de forma diferente
-   * consoante o número de fotografias.
-   *
-   * 1 → cartão grande e centrado
-   * 2 → 2 colunas
-   * 3 → 3 colunas
-   * 4 → grelha 2 x 2
-   *
-   * Isto evita a antiga divisão vertical "altura / count",
-   * que deixava 1 fotografia pequena e 4 fotografias
-   * demasiado comprimidas.
-   */
-  const areaX = 70;
-  const areaW = 940;
   const areaH =
     bottom - top;
 
-  const gap =
-    count === 1
-      ? 0
-      : count === 2
-        ? 26
-        : count === 3
-          ? 18
-          : 24;
-
-  let columns;
-  let rows;
-
-  if (count === 1) {
-    columns = 1;
-    rows = 1;
-  } else if (count === 2) {
-    columns = 2;
-    rows = 1;
-  } else if (count === 3) {
-    columns = 3;
-    rows = 1;
-  } else {
-    columns = 2;
-    rows = 2;
-  }
-
-  const cardW =
-    Math.floor(
-      (
-        areaW -
-        gap * (columns - 1)
-      ) / columns
-    );
-
-  const cardH =
-    Math.floor(
-      (
-        areaH -
-        gap * (rows - 1)
-      ) / rows
-    );
-
   /*
-   * Para 1 fotografia usamos uma largura ligeiramente
-   * menor que a área total e centramos o cartão.
-   * Assim a fotografia tem presença sem esmagar o resto
-   * da publicação.
+   * Layouts dedicados.
+   *
+   * Não dividimos simplesmente a altura pelo número
+   * de árbitros: cada quantidade recebe uma composição
+   * própria para Instagram 1080x1920.
    */
-  const singleW =
-    Math.min(
-      720,
-      areaW
+  if (count === 1) {
+    const w = 760;
+    const h = Math.min(820, areaH - 35);
+
+    drawOfficialCard(
+      ctx,
+      officials[0],
+      (1080 - w) / 2,
+      top + (areaH - h) / 2,
+      w,
+      h
     );
 
-  const singleH =
-    Math.min(
-      820,
-      areaH
+  } else if (count === 2) {
+    const gap = 28;
+    const w = Math.floor(
+      (900 - gap) / 2
     );
 
-  officials.forEach(
-    (official, i) => {
-      let x;
-      let y;
-      let w;
-      let h;
+    const h =
+      Math.min(
+        820,
+        areaH - 30
+      );
 
-      if (count === 1) {
-        w = singleW;
-        h = singleH;
+    const x1 =
+      (1080 - (w * 2 + gap)) / 2;
 
-        x =
-          areaX +
-          (
-            areaW -
-            w
-          ) / 2;
+    drawOfficialCard(
+      ctx,
+      officials[0],
+      x1,
+      top + (areaH - h) / 2,
+      w,
+      h
+    );
 
-        y =
-          top +
-          (
-            areaH -
-            h
-          ) / 2;
+    drawOfficialCard(
+      ctx,
+      officials[1],
+      x1 + w + gap,
+      top + (areaH - h) / 2,
+      w,
+      h
+    );
 
-      } else {
+  } else if (count === 3) {
+    const gap = 18;
+    const w = Math.floor(
+      (940 - gap * 2) / 3
+    );
+
+    const h =
+      Math.min(
+        820,
+        areaH - 28
+      );
+
+    const totalW =
+      w * 3 + gap * 2;
+
+    const x0 =
+      (1080 - totalW) / 2;
+
+    officials.forEach(
+      (official, i) => {
+        drawOfficialCard(
+          ctx,
+          official,
+          x0 + i * (w + gap),
+          top + (areaH - h) / 2,
+          w,
+          h
+        );
+      }
+    );
+
+  } else {
+    /*
+     * Quatro oficiais: grelha 2x2.
+     * Assim cada fotografia continua a ter presença
+     * visual e o espaço não fica comprimido em quatro
+     * faixas horizontais.
+     */
+    const gapX = 24;
+    const gapY = 24;
+
+    const w = 440;
+    const h = Math.min(
+      405,
+      Math.floor(
+        (areaH - gapY) / 2
+      )
+    );
+
+    const totalW =
+      w * 2 + gapX;
+
+    const x0 =
+      (1080 - totalW) / 2;
+
+    const totalH =
+      h * 2 + gapY;
+
+    const y0 =
+      top +
+      Math.max(
+        0,
+        (areaH - totalH) / 2
+      );
+
+    officials.forEach(
+      (official, i) => {
         const col =
-          i % columns;
+          i % 2;
 
         const row =
-          Math.floor(
-            i / columns
-          );
+          Math.floor(i / 2);
 
-        w = cardW;
-        h = cardH;
-
-        x =
-          areaX +
-          col *
-            (cardW + gap);
-
-        y =
-          top +
-          row *
-            (cardH + gap);
+        drawOfficialCard(
+          ctx,
+          official,
+          x0 + col * (w + gapX),
+          y0 + row * (h + gapY),
+          w,
+          h
+        );
       }
+    );
+  }
 
-      drawOfficialCard(
-        ctx,
-        official,
-        Math.round(x),
-        Math.round(y),
-        Math.round(w),
-        Math.round(h)
-      );
-    }
-  );
 
   /*
    * ======================================================
@@ -2719,53 +2904,44 @@ function renderMissing(items) {
           input.dataset.key
             .split('|');
 
-        const file =
-          input.files[0];
+        if (type === 'foto') {
+          setStatus(
+            `A preparar a fotografia de ${key}...`
+          );
+
+          const result =
+            await processAndStorePhoto(
+              key,
+              input.files[0]
+            );
+
+          if (!result?.img) {
+            setError(
+              `Não foi possível processar a fotografia de ${key}.`
+            );
+            continue;
+          }
+
+          setStatus(
+            result.saved
+              ? `Fotografia de ${key} processada e guardada na biblioteca.`
+              : `Fotografia de ${key} processada para esta sessão.`
+          );
+
+          continue;
+        }
 
         const img =
           await fileToImage(
-            file
+            input.files[0]
           );
 
-        if (type === 'foto') {
-          /*
-           * A fotografia fica imediatamente disponível
-           * nesta sessão.
-           */
-          state.assets.set(
-            'p:' + compact(key),
-            img
-          );
-
-          /*
-           * E é guardada permanentemente no GitHub.
-           * Se o GitHub/Vercel estiver indisponível,
-           * a publicação continua a poder ser gerada
-           * com a fotografia desta sessão.
-           */
-          const saved =
-            await savePhotoToLibrary(
-              key,
-              file
-            );
-
-          if (!saved) {
-            console.warn(
-              `A fotografia de ${key} foi carregada nesta sessão, ` +
-              'mas não foi possível guardá-la na biblioteca.'
-            );
-          }
-        } else if (type === 'escudo') {
-          state.assets.set(
-            's:' + compact(key),
-            img
-          );
-        } else {
-          state.assets.set(
-            'logo',
-            img
-          );
-        }
+        state.assets.set(
+          type === 'escudo'
+            ? 's:' + compact(key)
+            : 'logo',
+          img
+        );
       }
 
       setStatus(
@@ -2799,183 +2975,6 @@ function fileToImage(file) {
       img.src = u;
     }
   );
-}
-
-
-/* =========================================================
-   GUARDAR FOTOGRAFIA NA BIBLIOTECA
-   ========================================================= */
-
-/*
- * As fotografias fornecidas pelo utilizador são guardadas
- * como JPEG otimizado na biblioteca do projeto.
- *
- * Não existe qualquer remoção de fundo.
- * A imagem original continua a ser usada na publicação.
- */
-async function fileToOptimizedDataUrl(file, maxSide = 1600) {
-  const img = await fileToImage(file);
-
-  const iw =
-    img.naturalWidth ||
-    img.width;
-
-  const ih =
-    img.naturalHeight ||
-    img.height;
-
-  if (!iw || !ih) {
-    throw new Error(
-      'A fotografia não tem dimensões válidas.'
-    );
-  }
-
-  const scale =
-    Math.min(
-      1,
-      maxSide / Math.max(iw, ih)
-    );
-
-  const canvas =
-    document.createElement('canvas');
-
-  canvas.width =
-    Math.max(
-      1,
-      Math.round(iw * scale)
-    );
-
-  canvas.height =
-    Math.max(
-      1,
-      Math.round(ih * scale)
-    );
-
-  const ctx =
-    canvas.getContext('2d', {
-      alpha: false
-    });
-
-  ctx.fillStyle =
-    '#ffffff';
-
-  ctx.fillRect(
-    0,
-    0,
-    canvas.width,
-    canvas.height
-  );
-
-  ctx.drawImage(
-    img,
-    0,
-    0,
-    canvas.width,
-    canvas.height
-  );
-
-  return canvas.toDataURL(
-    'image/jpeg',
-    0.90
-  );
-}
-
-async function fileToDataUrl(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-
-    reader.onload = () => resolve(String(reader.result || ''));
-    reader.onerror = () => reject(reader.error || new Error('Não foi possível ler o ficheiro.'));
-
-    reader.readAsDataURL(file);
-  });
-}
-
-async function saveShieldToLibrary(team, file) {
-  try {
-    const dataUrl = await fileToDataUrl(file);
-
-    const response = await fetch('/api/escudo', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Accept': 'application/json'
-      },
-      body: JSON.stringify({
-        team,
-        dataUrl
-      })
-    });
-
-    const data = await response.json().catch(() => ({}));
-
-    if (!response.ok || !data?.ok) {
-      throw new Error(
-        data?.error ||
-        `Erro ao guardar escudo (${response.status}).`
-      );
-    }
-
-    return data;
-  } catch (error) {
-    console.warn(
-      'Não foi possível guardar o escudo na biblioteca:',
-      error
-    );
-
-    return null;
-  }
-}
-
-async function savePhotoToLibrary(
-  name,
-  file
-) {
-  try {
-    const dataUrl =
-      await fileToOptimizedDataUrl(
-        file
-      );
-
-    const response =
-      await fetch(
-        '/api/foto',
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type':
-              'application/json',
-            'Accept':
-              'application/json'
-          },
-          body: JSON.stringify({
-            name,
-            dataUrl
-          })
-        }
-      );
-
-    const data =
-      await response
-        .json()
-        .catch(() => ({}));
-
-    if (!response.ok) {
-      throw new Error(
-        data?.error ||
-        `Erro ao guardar fotografia (${response.status}).`
-      );
-    }
-
-    return data;
-  } catch (error) {
-    console.warn(
-      'Não foi possível guardar a fotografia na biblioteca:',
-      error
-    );
-
-    return null;
-  }
 }
 
 
@@ -3361,55 +3360,10 @@ async function generateManual() {
   );
 
   /*
-   * Escudos.
+   * Escudos:
    *
-   * Se o utilizador escolher manualmente um escudo,
-   * ele tem prioridade absoluta sobre a pesquisa automática.
-   * Fica disponível imediatamente nesta sessão e é também
-   * enviado para a biblioteca permanente do GitHub.
-   */
-  const manualShieldFiles = [
-    ['mHomeShield', home],
-    ['mAwayShield', away]
-  ];
-
-  for (const [inputId, team] of manualShieldFiles) {
-    const file = $(inputId)?.files?.[0];
-    if (!file) continue;
-
-    try {
-      const img = await fileToImage(file);
-
-      state.assets.set(
-        's:' + compact(team),
-        img
-      );
-
-      state.assets.set(
-        'source:' + compact(team),
-        'Ficheiro escolhido manualmente'
-      );
-
-      const saved = await saveShieldToLibrary(team, file);
-
-      if (!saved) {
-        console.warn(
-          `O escudo de ${team} foi carregado nesta sessão, mas não foi possível guardá-lo na biblioteca.`
-        );
-      }
-    } catch (error) {
-      console.warn(
-        `Não foi possível carregar o escudo manual de ${team}:`,
-        error
-      );
-    }
-  }
-
-  /*
-   * Escudos restantes:
-   * local primeiro, online depois.
-   * Os escudos escolhidos manualmente já estão no cache
-   * e por isso não serão substituídos pela pesquisa online.
+   * local primeiro
+   * online depois
    */
   await Promise.race([
     prefetchShields([g]),
