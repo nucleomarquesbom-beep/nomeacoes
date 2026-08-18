@@ -45,8 +45,18 @@
   <div class="grid2">
     <div><label>Competição</label><input id="mCompetition" placeholder="Liga 3 Placard — 2.ª Fase"></div>
     <div><label>Data / hora (opcional)</label><input id="mDate" placeholder="16/08/2026 · 16:00"></div>
-    <div><label>Equipa da casa</label><input id="mHome" placeholder="Lusitano de Évora C."></div>
-    <div><label>Equipa visitante</label><input id="mAway" placeholder="Atlético CP SAD"></div>
+    <div>
+      <label>Equipa da casa</label>
+      <input id="mHome" placeholder="Lusitano de Évora C.">
+      <label class="manualShieldLabel">Escudo da casa (opcional)</label>
+      <input id="mHomeShield" type="file" accept="image/png,image/jpeg,image/webp">
+    </div>
+    <div>
+      <label>Equipa visitante</label>
+      <input id="mAway" placeholder="Atlético CP SAD">
+      <label class="manualShieldLabel">Escudo visitante (opcional)</label>
+      <input id="mAwayShield" type="file" accept="image/png,image/jpeg,image/webp">
+    </div>
   </div>
 
   <label>Árbitros / observadores</label>
