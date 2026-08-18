@@ -726,12 +726,8 @@ async function saveProcessedPhoto(name, dataUrl) {
 function fileToDataUrl(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
-
     reader.onload = () => resolve(reader.result);
-    reader.onerror = () => reject(
-      reader.error || new Error('Não foi possível ler a fotografia.')
-    );
-
+    reader.onerror = () => reject(reader.error || new Error('Não foi possível ler a fotografia.'));
     reader.readAsDataURL(file);
   });
 }
@@ -740,36 +736,22 @@ async function processAndStorePhoto(name, file) {
   if (!file) return null;
 
   try {
-    // A fotografia é usada tal como foi carregada. Não há remoção de fundo.
     const dataUrl = await fileToDataUrl(file);
     const img = await tryImage(dataUrl);
+    if (!img) throw new Error('A fotografia não pôde ser carregada.');
 
-    if (!img) {
-      throw new Error('A fotografia não pôde ser carregada.');
+    state.assets.set('p:' + compact(name), img);
+
+    let saved = false;
+    try {
+      saved = await saveProcessedPhoto(name, dataUrl);
+    } catch (error) {
+      console.warn('Fotografia carregada, mas não foi possível guardá-la:', error);
     }
 
-    state.assets.set(
-      'p:' + compact(name),
-      img
-    );
-
-    const saved = await saveProcessedPhoto(
-      name,
-      dataUrl
-    );
-
-    return {
-      img,
-      saved
-    };
-
+    return { img, saved };
   } catch (error) {
-    console.error(
-      'Falha ao carregar a fotografia:',
-      name,
-      error
-    );
-
+    console.error('Falha ao carregar a fotografia:', name, error);
     return null;
   }
 }
@@ -1560,282 +1542,290 @@ function drawOfficialCard(
   w,
   h
 ) {
-  /*
-   * CARTÃO FOTOGRÁFICO
-   *
-   * A fotografia original é usada sem remoção de fundo.
-   * O cartão mantém a fotografia na zona superior e a
-   * identificação fica sempre por baixo.
-   *
-   * Esta é a composição que estava correta:
-   * - fotografia dominante;
-   * - função em dourado;
-   * - nome em escuro;
-   * - A.F. COIMBRA em dourado;
-   * - sem texto ao lado da fotografia.
-   */
-
   const photo =
     state.assets.get(
       'p:' + compact(official.name)
     ) || null;
 
-  const radius =
-    Math.max(
-      14,
-      Math.round(
-        Math.min(w, h) * 0.025
-      )
-    );
+  /*
+   * O cartão é deliberadamente vertical.
+   * A fotografia domina a composição e o texto fica
+   * numa zona própria, para nunca competir com a pessoa.
+   */
+  const compactCard =
+    w < 500 || h < 500;
 
-  const border =
+  const textH =
+    compactCard
+      ? Math.min(105, Math.max(88, h * 0.28))
+      : Math.min(155, Math.max(125, h * 0.21));
+
+  const frameX =
+    x + (compactCard ? 18 : 34);
+
+  const frameW =
+    w - (compactCard ? 36 : 68);
+
+  const frameY =
+    y + (compactCard ? 10 : 18);
+
+  const frameH =
     Math.max(
-      8,
-      Math.round(
-        Math.min(w, h) * 0.018
-      )
+      110,
+      h - textH - (compactCard ? 22 : 38)
     );
 
   /*
-   * A faixa inferior fica reservada exclusivamente
-   * para função + nome + associação.
+   * Sombra/moldura.
    */
-  const textH =
-    Math.max(
-      92,
-      Math.min(
-        150,
-        h * 0.24
-      )
-    );
-
-  const photoX = x;
-  const photoY = y;
-  const photoW = w;
-  const photoH = h - textH;
-
-  /* Sombra/moldura exterior. */
   ctx.save();
 
   ctx.shadowColor =
-    'rgba(0,0,0,.34)';
+    'rgba(0,0,0,.28)';
 
-  ctx.shadowBlur = 18;
-  ctx.shadowOffsetY = 7;
+  ctx.shadowBlur =
+    compactCard ? 10 : 18;
 
-  roundRect(
-    ctx,
-    x,
-    y,
-    w,
-    h,
-    radius,
-    '#f4f1e9'
+  ctx.shadowOffsetY =
+    compactCard ? 4 : 8;
+
+  ctx.fillStyle =
+    '#f4f1e9';
+
+  ctx.fillRect(
+    frameX,
+    frameY,
+    frameW,
+    frameH
   );
 
   ctx.restore();
 
   /*
-   * Fotografia.
-   *
-   * Não removemos o fundo e não alteramos a fotografia.
-   * Apenas fazemos o recorte "cover" para preencher a
-   * área fotográfica do cartão.
+   * Área interior. Não fazemos clip à pessoa:
+   * a transparência permite que a cabeça/ombros
+   * ultrapassem ligeiramente a moldura.
    */
-  ctx.save();
+  const innerX =
+    frameX + (compactCard ? 8 : 12);
 
-  ctx.beginPath();
+  const innerY =
+    frameY + (compactCard ? 8 : 12);
 
-  ctx.roundRect(
-    photoX + border,
-    photoY + border,
-    photoW - border * 2,
-    photoH - border,
-    Math.max(8, radius - 4)
-  );
+  const innerW =
+    frameW - (compactCard ? 16 : 24);
 
-  ctx.clip();
+  const innerH =
+    frameH - (compactCard ? 16 : 24);
 
   if (photo) {
-    drawCover(
-      ctx,
+    const iw =
+      photo.naturalWidth ||
+      photo.width ||
+      1;
+
+    const ih =
+      photo.naturalHeight ||
+      photo.height ||
+      1;
+
+    /*
+     * A pessoa é dimensionada pela altura e pela largura,
+     * mas nunca fica pequena dentro do cartão.
+     */
+    const maxW =
+      innerW * (
+        compactCard
+          ? 0.94
+          : 0.88
+      );
+
+    const maxH =
+      innerH * (
+        compactCard
+          ? 1.10
+          : 1.12
+      );
+
+    const scale =
+      Math.min(
+        maxW / iw,
+        maxH / ih
+      );
+
+    const dw =
+      iw * scale;
+
+    const dh =
+      ih * scale;
+
+    /*
+     * Anchor inferior: os pés/corpo ficam naturalmente
+     * assentes no fundo da fotografia.
+     */
+    const dx =
+      frameX +
+      (frameW - dw) / 2;
+
+    const dy =
+      frameY +
+      frameH -
+      dh +
+      (
+        compactCard
+          ? 18
+          : 28
+      );
+
+    ctx.save();
+
+    ctx.globalAlpha = 1;
+
+    ctx.drawImage(
       photo,
-      photoX + border,
-      photoY + border,
-      photoW - border * 2,
-      photoH - border,
-      0
+      dx,
+      dy,
+      dw,
+      dh
     );
+
+    ctx.restore();
+
   } else {
     ctx.fillStyle =
       '#596b73';
 
     ctx.fillRect(
-      photoX + border,
-      photoY + border,
-      photoW - border * 2,
-      photoH - border
+      innerX,
+      innerY,
+      innerW,
+      innerH
     );
   }
 
-  ctx.restore();
+  /*
+   * Zona textual.
+   *
+   * Cores exatamente alinhadas com o resto da publicação:
+   * dourado #e7b63d + branco #f5f7f8.
+   */
+  const textY =
+    y + h - textH;
 
-  /* Linha dourada entre fotografia e identificação. */
+  ctx.fillStyle =
+    'rgba(16,34,43,.97)';
+
+  ctx.fillRect(
+    x,
+    textY,
+    w,
+    textH
+  );
+
   ctx.fillStyle =
     '#e7b63d';
 
   ctx.fillRect(
-    x + border,
-    photoY + photoH - 3,
-    w - border * 2,
-    6
+    x,
+    textY,
+    w,
+    4
   );
 
-  /*
-   * IDENTIFICAÇÃO
-   */
   const centerX =
     x + w / 2;
 
-  const innerW =
-    w - border * 2 - 24;
+  const role =
+    String(
+      official.role || 'Árbitro'
+    )
+      .toUpperCase();
 
-  const compactCard =
-    w < 500 || h < 430;
-
-  const roleSize =
-    compactCard
-      ? Math.max(
-          17,
-          Math.min(
-            23,
-            textH * 0.20
-          )
-        )
-      : Math.max(
-          21,
-          Math.min(
-            30,
-            textH * 0.22
-          )
-        );
-
-  const nameStart =
-    compactCard
-      ? Math.max(
-          27,
-          Math.min(
-            42,
-            textH * 0.34
-          )
-        )
-      : Math.max(
-          34,
-          Math.min(
-            56,
-            textH * 0.39
-          )
-        );
-
-  const nameMin =
-    compactCard ? 18 : 22;
-
-  const nameText =
+  const name =
     String(
       official.name || ''
-    ).toUpperCase();
+    )
+      .toUpperCase();
+
+  /*
+   * Lettering: hierarquia visual consistente.
+   */
+  const roleSize =
+    fit(
+      ctx,
+      role,
+      w - 30,
+      compactCard ? 18 : 25,
+      14
+    );
 
   const nameSize =
     fit(
       ctx,
-      nameText,
-      innerW,
-      nameStart,
-      nameMin
+      name,
+      w - 30,
+      compactCard ? 28 : 44,
+      compactCard ? 19 : 25
     );
 
-  ctx.font =
-    `900 ${nameSize}px Arial`;
+  const afSize =
+    fit(
+      ctx,
+      'A.F. COIMBRA',
+      w - 30,
+      compactCard ? 15 : 21,
+      12
+    );
+
+  ctx.textAlign =
+    'center';
+
+  const roleLine =
+    roleSize + 4;
 
   const nameLines =
     wrapLines(
       ctx,
-      nameText,
-      innerW,
-      2
+      name,
+      w - 30,
+      compactCard ? 2 : 2
     );
 
   const nameLineHeight =
-    nameSize +
-    (compactCard ? 2 : 5);
-
-  const afSize =
-    compactCard
-      ? Math.max(
-          15,
-          Math.min(
-            20,
-            textH * 0.16
-          )
-        )
-      : Math.max(
-          17,
-          Math.min(
-            23,
-            textH * 0.17
-          )
-        );
-
-  const roleGap =
-    compactCard ? 5 : 8;
-
-  const nameGap =
-    compactCard ? 4 : 7;
+    nameSize + 2;
 
   const totalTextH =
-    roleSize +
-    roleGap +
-    nameLines.length * nameLineHeight +
-    nameGap +
+    roleLine +
+    7 +
+    nameLines.length *
+      nameLineHeight +
+    6 +
     afSize;
 
   let cursorY =
-    photoY +
-    photoH +
-    (
-      textH -
-      totalTextH
-    ) / 2;
-
-  /*
-   * FUNÇÃO
-   */
-  ctx.textAlign =
-    'center';
+    textY +
+    Math.max(
+      14,
+      (textH - totalTextH) / 2
+    );
 
   ctx.fillStyle =
     '#e7b63d';
 
   ctx.font =
-    `700 ${roleSize}px Arial`;
+    `800 ${roleSize}px Arial`;
 
   ctx.fillText(
-    String(
-      official.role || 'Árbitro'
-    ).toUpperCase(),
+    role,
     centerX,
     cursorY + roleSize
   );
 
   cursorY +=
-    roleSize +
-    roleGap;
+    roleLine + 7;
 
-  /*
-   * NOME
-   */
   ctx.fillStyle =
-    '#10222b';
+    '#f5f7f8';
 
   ctx.font =
     `900 ${nameSize}px Arial`;
@@ -1851,12 +1841,8 @@ function drawOfficialCard(
       nameLineHeight;
   }
 
-  cursorY +=
-    nameGap;
+  cursorY += 6;
 
-  /*
-   * ASSOCIAÇÃO
-   */
   ctx.fillStyle =
     '#e7b63d';
 
@@ -1868,10 +1854,8 @@ function drawOfficialCard(
     centerX,
     cursorY + afSize
   );
-
-  ctx.textAlign =
-    'left';
 }
+
 
 /* =========================================================
    NOME DA COMPETIÇÃO
@@ -1977,133 +1961,53 @@ function displayCompetition(
    TÍTULO DA COMPETIÇÃO
    ========================================================= */
 
-function drawCompetitionTitle(
-  ctx,
-  comp
-) {
+function drawCompetitionTitle(ctx, comp) {
   const centerX = 540;
-  const safeWidth = 820;
+  const maxWidth = 820;
   const title = String(comp?.title || '').trim();
   const detail = String(comp?.detail || '').trim();
 
-  let titleSize = 104;
-  let titleLines = [];
+  if (!title) return;
 
-  while (titleSize >= 48) {
-    ctx.font = `900 ${titleSize}px Arial`;
-    titleLines = wrapLines(ctx, title, safeWidth, 2);
-
-    if (
-      titleLines.length <= 2 &&
-      titleLines.every(
-        line => ctx.measureText(line).width <= safeWidth
-      )
-    ) {
-      break;
-    }
-
-    titleSize -= 2;
+  let size = 104;
+  let lines = [];
+  while (size >= 48) {
+    ctx.font = `900 ${size}px Arial`;
+    lines = wrapLines(ctx, title, maxWidth, 2);
+    if (lines.length <= 2 && lines.every(line => ctx.measureText(line).width <= maxWidth)) break;
+    size -= 2;
   }
 
   ctx.textAlign = 'center';
-  ctx.font = `900 ${titleSize}px Arial`;
+  ctx.fillStyle = '#f5f7f8';
+  ctx.font = `900 ${size}px Arial`;
+  const lineHeight = size + 8;
+  const firstY = lines.length === 1 ? 300 : 270;
+  lines.forEach((line, i) => ctx.fillText(line, centerX, firstY + i * lineHeight));
 
-  const match = title.match(/^(.*?)(\d+)$/);
-
-  if (match && titleLines.length === 1) {
-    const left = match[1].trimEnd();
-    const num = match[2];
-    const gap = 10;
-
-    const leftW = ctx.measureText(left).width;
-    const numW = ctx.measureText(num).width;
-    const totalW = leftW + gap + numW;
-
-    let x = centerX - totalW / 2;
-
-    ctx.textAlign = 'left';
-    ctx.fillStyle = '#f5f7f8';
-    ctx.fillText(left, x, 300);
-
-    x += leftW + gap;
-
-    ctx.fillStyle = '#e7b63d';
-    ctx.fillText(num, x, 300);
-  } else {
-    const lineHeight = titleSize + 8;
-    const firstY =
-      titleLines.length === 1
-        ? 300
-        : 270;
-
-    ctx.fillStyle = '#f5f7f8';
-
-    titleLines.forEach((line, index) => {
-      ctx.fillText(
-        line,
-        centerX,
-        firstY + index * lineHeight
-      );
-    });
-  }
-
-  const titleBottom =
-    titleLines.length === 1
-      ? 300
-      : 270 + (titleLines.length - 1) * (titleSize + 8);
-
+  const titleBottom = firstY + (lines.length - 1) * lineHeight;
   const lineY = titleBottom + 48;
-
-  drawGoldLine(
-    ctx,
-    300,
-    lineY,
-    780
-  );
+  drawGoldLine(ctx, 300, lineY, 780);
 
   if (detail) {
     let detailSize = 25;
     let detailLines = [];
-
     while (detailSize >= 15) {
       ctx.font = `700 ${detailSize}px Arial`;
-      detailLines = wrapLines(
-        ctx,
-        detail,
-        safeWidth,
-        2
-      );
-
-      if (
-        detailLines.length <= 2 &&
-        detailLines.every(
-          line => ctx.measureText(line).width <= safeWidth
-        )
-      ) {
-        break;
-      }
-
+      detailLines = wrapLines(ctx, detail, maxWidth, 2);
+      if (detailLines.length <= 2 && detailLines.every(line => ctx.measureText(line).width <= maxWidth)) break;
       detailSize -= 1;
     }
-
     ctx.font = `700 ${detailSize}px Arial`;
     ctx.textAlign = 'center';
     ctx.fillStyle = '#f5f7f8';
-
-    const detailLineHeight = detailSize + 5;
     const detailY = lineY + 48;
-
-    detailLines.forEach((line, index) => {
-      ctx.fillText(
-        line,
-        centerX,
-        detailY + index * detailLineHeight
-      );
-    });
+    const detailLineHeight = detailSize + 5;
+    detailLines.forEach((line, i) => ctx.fillText(line, centerX, detailY + i * detailLineHeight));
   }
-
   ctx.textAlign = 'left';
 }
+
 
 
 /* =========================================================
