@@ -1,8 +1,7 @@
 import sharp from "sharp";
 
 const ZEROZERO = "https://www.zerozero.pt";
-const UA = "Mozilla/5.0 (compatible; NAF-Marques-Bom/2.0)";
-const IMAGE_RE = /\/img\/logos\/equipas\//i;
+const UA = "Mozilla/5.0 (compatible; NAF-Marques-Bom/3.0)";
 
 function normalize(value = "") {
   return String(value)
@@ -31,18 +30,21 @@ function safeFilename(value = "") {
     .toLowerCase() || "escudo";
 }
 
-function similarityScore(a, b) {
+function scoreName(a, b) {
   const x = normalize(a);
   const y = normalize(b);
+
   if (!x || !y) return -1;
   if (x === y) return 1000;
+
   if (x.includes(y) || y.includes(x)) {
     return 700 - Math.abs(x.length - y.length);
   }
 
-  const ax = new Set(x.split(" "));
-  const by = new Set(y.split(" "));
-  const common = [...ax].filter((word) => by.has(word)).length;
+  const A = new Set(x.split(" "));
+  const B = new Set(y.split(" "));
+  const common = [...A].filter(word => B.has(word)).length;
+
   return common * 60 - Math.abs(x.length - y.length);
 }
 
@@ -54,184 +56,15 @@ function githubConfig() {
   };
 }
 
-async function fetchText(url) {
-  const response = await fetch(url, {
+async function request(url, options = {}) {
+  return fetch(url, {
+    ...options,
     headers: {
       "User-Agent": UA,
-      Accept: "text/html,application/xhtml+xml"
+      ...(options.headers || {})
     },
     redirect: "follow"
   });
-
-  if (!response.ok) {
-    throw new Error(`ZeroZero respondeu ${response.status}`);
-  }
-
-  return response.text();
-}
-
-async function fetchImage(url) {
-  const response = await fetch(url, {
-    headers: {
-      "User-Agent": UA,
-      Accept: "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"
-    },
-    redirect: "follow"
-  });
-
-  if (!response.ok) return null;
-
-  const type = (response.headers.get("content-type") || "").toLowerCase();
-  if (!type.startsWith("image/")) return null;
-
-  return Buffer.from(await response.arrayBuffer());
-}
-
-function absoluteUrl(base, value) {
-  try {
-    return new URL(String(value).replace(/&amp;/g, "&"), base).href;
-  } catch {
-    return null;
-  }
-}
-
-function stripHtml(value = "") {
-  return String(value)
-    .replace(/<script[\s\S]*?<\/script>/gi, " ")
-    .replace(/<style[\s\S]*?<\/style>/gi, " ")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&nbsp;/gi, " ")
-    .replace(/&amp;/gi, "&")
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;/gi, "'")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function extractTeamLinks(html) {
-  const result = [];
-  const seen = new Set();
-
-  const re =
-    /<a\b[^>]*href=["']([^"']*\/equipa\/[^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
-
-  let match;
-  while ((match = re.exec(html))) {
-    const href = absoluteUrl(ZEROZERO, match[1]);
-    const label = stripHtml(match[2]);
-
-    if (!href || !label || seen.has(href)) continue;
-    if (label.length > 120) continue;
-
-    seen.add(href);
-    result.push({ url: href, name: label });
-  }
-
-  return result;
-}
-
-function extractLogoCandidates(html, pageUrl) {
-  const candidates = [];
-  const add = (value) => {
-    const url = absoluteUrl(pageUrl, value);
-    if (!url || !IMAGE_RE.test(url)) return;
-    if (!candidates.includes(url)) candidates.push(url);
-  };
-
-  // Direct image URLs.
-  const direct =
-    /https?:\/\/[^"'<>\\s]+\/img\/logos\/equipas\/[^"'<>\\s]+/gi;
-
-  for (const match of html.matchAll(direct)) {
-    add(match[0]);
-  }
-
-  // src/data-src/data-original.
-  const attributes =
-    /(?:src|data-src|data-original|content)=["']([^"']*\/img\/logos\/equipas\/[^"']+)["']/gi;
-
-  for (const match of html.matchAll(attributes)) {
-    add(match[1]);
-  }
-
-  // srcset.
-  const srcset = /srcset=["']([^"']+)["']/gi;
-  for (const match of html.matchAll(srcset)) {
-    for (const item of match[1].split(",")) {
-      add(item.trim().split(/\s+/)[0]);
-    }
-  }
-
-  return candidates;
-}
-
-async function findZeroZeroTeam(teamName) {
-  const query = cleanTeamName(teamName);
-
-  const searchUrls = [
-    `${ZEROZERO}/search.php?search_string=${encodeURIComponent(query)}`,
-    `${ZEROZERO}/pesquisa?query=${encodeURIComponent(query)}`
-  ];
-
-  const candidates = [];
-
-  for (const searchUrl of searchUrls) {
-    try {
-      const html = await fetchText(searchUrl);
-      candidates.push(...extractTeamLinks(html));
-      if (candidates.length) break;
-    } catch {
-      // Try the next known ZeroZero search format.
-    }
-  }
-
-  if (!candidates.length) {
-    throw new Error(`Equipa "${query}" não encontrada no ZeroZero.`);
-  }
-
-  const ranked = candidates
-    .map((item) => ({
-      ...item,
-      score: similarityScore(query, item.name)
-    }))
-    .sort((a, b) => b.score - a.score);
-
-  const best = ranked[0];
-
-  // Never accept a weak match. This prevents "Sporting" from becoming
-  // an unrelated Sporting team just because it appeared first.
-  if (best.score < 500) {
-    throw new Error(
-      `O resultado do ZeroZero não foi suficientemente seguro para "${query}".`
-    );
-  }
-
-  const pageHtml = await fetchText(best.url);
-  const logos = extractLogoCandidates(pageHtml, best.url);
-
-  if (!logos.length) {
-    throw new Error(
-      `A página do ZeroZero para "${best.name}" não contém o escudo esperado.`
-    );
-  }
-
-  return {
-    requestedName: query,
-    zeroZeroName: best.name,
-    zeroZeroPage: best.url,
-    zeroZeroScore: best.score,
-    logoUrl: logos[0]
-  };
-}
-
-async function imageDataUrl(buffer) {
-  const png = await sharp(buffer, { failOn: "none" })
-    .rotate()
-    .ensureAlpha()
-    .png()
-    .toBuffer();
-
-  return `data:image/png;base64,${png.toString("base64")}`;
 }
 
 async function githubRequest(url, options = {}) {
@@ -252,38 +85,321 @@ async function githubRequest(url, options = {}) {
   });
 }
 
+function absoluteUrl(base, value) {
+  try {
+    return new URL(
+      String(value).replace(/&amp;/g, "&").replace(/\\\//g, "/"),
+      base
+    ).href;
+  } catch {
+    return null;
+  }
+}
+
+function stripHtml(value = "") {
+  return String(value)
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/*
+ * O ZeroZero actual usa /pesquisa?search_txt=...
+ * O endpoint antigo /search.php?search_string=... fica como fallback.
+ */
+async function searchZeroZero(query) {
+  const urls = [
+    `${ZEROZERO}/pesquisa?search_txt=${encodeURIComponent(query)}`,
+    `${ZEROZERO}/search.php?search_string=${encodeURIComponent(query)}`
+  ];
+
+  const candidates = [];
+  const seen = new Set();
+
+  for (const url of urls) {
+    try {
+      const response = await request(url, {
+        headers: {
+          Accept: "text/html,application/xhtml+xml"
+        }
+      });
+
+      if (!response.ok) continue;
+
+      const html = await response.text();
+
+      /*
+       * Aceitamos /equipa/ e também URLs de equipa que o ZeroZero
+       * possa introduzir no futuro. Nunca aceitamos links externos.
+       */
+      const re = /<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+      let match;
+
+      while ((match = re.exec(html))) {
+        const href = absoluteUrl(url, match[1]);
+        if (!href) continue;
+
+        let parsed;
+        try {
+          parsed = new URL(href);
+        } catch {
+          continue;
+        }
+
+        if (parsed.hostname !== "www.zerozero.pt") continue;
+        if (!/\/equipa\//i.test(parsed.pathname)) continue;
+
+        const label = stripHtml(match[2]);
+        if (!label || label.length > 140) continue;
+
+        const cleanUrl = `${parsed.origin}${parsed.pathname}${parsed.search}`;
+
+        if (seen.has(cleanUrl)) continue;
+        seen.add(cleanUrl);
+
+        candidates.push({
+          name: label,
+          url: cleanUrl,
+          score: scoreName(query, label)
+        });
+      }
+
+      /*
+       * O endpoint correcto respondeu: não é necessário fazer uma
+       * segunda pesquisa que possa duplicar resultados.
+       */
+      if (candidates.length) break;
+    } catch {
+      // Tenta o endpoint seguinte.
+    }
+  }
+
+  return candidates.sort((a, b) => b.score - a.score);
+}
+
+function extractLogoCandidates(html, pageUrl) {
+  const out = [];
+  const seen = new Set();
+
+  function add(raw, reason = "") {
+    const url = absoluteUrl(pageUrl, raw);
+    if (!url) return;
+
+    try {
+      const parsed = new URL(url);
+
+      /*
+       * A imagem tem de vir do ZeroZero ou de um domínio/CDN usado
+       * pelo próprio ZeroZero. Não aceitamos imagens de terceiros.
+       */
+      const ownDomain =
+        parsed.hostname === "www.zerozero.pt" ||
+        parsed.hostname.endsWith(".zerozero.pt");
+
+      if (!ownDomain) return;
+
+      if (seen.has(url)) return;
+      seen.add(url);
+
+      out.push({ url, reason });
+    } catch {}
+  }
+
+  /*
+   * 1. Caminho clássico dos escudos do ZeroZero.
+   */
+  for (const m of html.matchAll(
+    /https?:\/\/[^"'<>\\s]+\/img\/logos\/equipas\/[^"'<>\\s]+/gi
+  )) {
+    add(m[0], "logo-equipa");
+  }
+
+  /*
+   * 2. Meta og:image/twitter:image.
+   */
+  for (const m of html.matchAll(
+    /<meta\b[^>]*(?:property|name)=["'](?:og:image|twitter:image)["'][^>]*content=["']([^"']+)["'][^>]*>/gi
+  )) {
+    add(m[1], "meta-image");
+  }
+
+  /*
+   * 3. src/data-src/data-original.
+   */
+  for (const m of html.matchAll(
+    /(?:src|data-src|data-original|data-lazy-src)=["']([^"']+)["']/gi
+  )) {
+    const raw = m[1];
+
+    if (
+      /\/img\/logos\/equipas\//i.test(raw) ||
+      /(logo|badge|emblem|escudo|crest)/i.test(raw)
+    ) {
+      add(raw, "img-logo");
+    }
+  }
+
+  /*
+   * 4. srcset.
+   */
+  for (const m of html.matchAll(
+    /srcset=["']([^"']+)["']/gi
+  )) {
+    for (const part of m[1].split(",")) {
+      const raw = part.trim().split(/\s+/)[0];
+
+      if (
+        /\/img\/logos\/equipas\//i.test(raw) ||
+        /(logo|badge|emblem|escudo|crest)/i.test(raw)
+      ) {
+        add(raw, "srcset-logo");
+      }
+    }
+  }
+
+  return out;
+}
+
+async function findZeroZeroTeam(teamName) {
+  const query = cleanTeamName(teamName);
+  const candidates = await searchZeroZero(query);
+
+  if (!candidates.length) {
+    throw new Error(
+      `A pesquisa do ZeroZero não devolveu equipas para "${query}".`
+    );
+  }
+
+  /*
+   * O primeiro resultado tem de ser uma correspondência forte.
+   * Isto evita escolher, por exemplo, outra equipa com o mesmo nome
+   * mas de uma cidade/modalidade diferente.
+   */
+  const best = candidates[0];
+
+  if (best.score < 500) {
+    throw new Error(
+      `O ZeroZero devolveu resultados, mas nenhum corresponde com segurança a "${query}".`
+    );
+  }
+
+  const pageResponse = await request(best.url, {
+    headers: {
+      Accept: "text/html,application/xhtml+xml"
+    }
+  });
+
+  if (!pageResponse.ok) {
+    throw new Error(
+      `A página da equipa no ZeroZero respondeu ${pageResponse.status}.`
+    );
+  }
+
+  const pageHtml = await pageResponse.text();
+  const logos = extractLogoCandidates(pageHtml, best.url);
+
+  if (!logos.length) {
+    throw new Error(
+      `A página "${best.name}" foi encontrada no ZeroZero, mas o escudo não foi localizado.`
+    );
+  }
+
+  return {
+    requestedName: query,
+    zeroZeroName: best.name,
+    zeroZeroPage: best.url,
+    zeroZeroScore: best.score,
+    logoUrl: logos[0].url
+  };
+}
+
+async function downloadImage(url) {
+  try {
+    const response = await request(url, {
+      headers: {
+        Accept:
+          "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"
+      }
+    });
+
+    if (!response.ok) return null;
+
+    const type =
+      (response.headers.get("content-type") || "").toLowerCase();
+
+    if (!type.startsWith("image/")) return null;
+
+    return Buffer.from(await response.arrayBuffer());
+  } catch {
+    return null;
+  }
+}
+
+async function toPngDataUrl(buffer) {
+  const png = await sharp(buffer, {
+    failOn: "none"
+  })
+    .rotate()
+    .ensureAlpha()
+    .png()
+    .toBuffer();
+
+  return `data:image/png;base64,${png.toString("base64")}`;
+}
+
 async function findCachedShield(teamName) {
   const { repo, branch } = githubConfig();
+
   if (!repo) return null;
 
-  const url =
-    `https://api.github.com/repos/${repo}/contents/public/escudos` +
-    `?ref=${encodeURIComponent(branch)}`;
-
   try {
-    const response = await githubRequest(url);
+    const response = await githubRequest(
+      `https://api.github.com/repos/${repo}/contents/public/escudos?ref=${encodeURIComponent(branch)}`
+    );
+
     if (!response.ok) return null;
 
     const files = await response.json();
     const wanted = safeFilename(teamName);
 
-    const file = files.find((item) => {
+    /*
+     * Mantemos compatibilidade com os nomes que já tens no GitHub.
+     * Não obrigamos a que o nome pedido seja exactamente igual ao
+     * nome do ficheiro.
+     */
+    const variants = new Set([
+      wanted,
+      safeFilename(
+        teamName.replace(/\s*\/\s*(?:OAF|SAD|SDUQ)\s*$/i, "")
+      ),
+      safeFilename(teamName.replace(/[,.]/g, ""))
+    ]);
+
+    const file = files.find(item => {
       if (item.type !== "file") return false;
 
-      const filename = item.name
-        .replace(/\.(png|jpe?g|webp|svg)$/i, "");
+      const base = item.name.replace(
+        /\.(png|jpe?g|webp|svg)$/i,
+        ""
+      );
 
-      return safeFilename(filename) === wanted;
+      return variants.has(safeFilename(base));
     });
 
     if (!file?.download_url) return null;
 
-    const image = await fetchImage(file.download_url);
-    if (!image) return null;
+    const buffer = await downloadImage(file.download_url);
+    if (!buffer) return null;
 
     return {
       team: teamName,
-      imageDataUrl: await imageDataUrl(image),
+      imageDataUrl: await toPngDataUrl(buffer),
       url: file.download_url,
       source: "GitHub",
       cached: true,
@@ -294,7 +410,7 @@ async function findCachedShield(teamName) {
   }
 }
 
-async function saveShield(teamName, imageData) {
+async function saveShield(teamName, dataUrl) {
   const { repo, branch } = githubConfig();
 
   if (!repo) {
@@ -304,46 +420,43 @@ async function saveShield(teamName, imageData) {
     };
   }
 
-  const match = String(imageData).match(
+  const match = String(dataUrl).match(
     /^data:image\/png;base64,(.+)$/i
   );
 
   if (!match) {
     return {
       ok: false,
-      error: "A imagem a guardar não está no formato PNG esperado."
+      error: "A imagem não está no formato PNG esperado."
     };
   }
 
   const filename = `${safeFilename(teamName)}.png`;
-  const path = `public/escudos/${filename}`;
+  const filePath = `public/escudos/${filename}`;
 
   const apiUrl =
     `https://api.github.com/repos/${repo}/contents/` +
-    path.split("/").map(encodeURIComponent).join("/");
+    filePath.split("/").map(encodeURIComponent).join("/");
 
-  const encoded = match[1];
-
-  // Check whether the file already exists. If it does, never overwrite it
-  // automatically: a previously saved shield is considered authoritative.
   const existing = await githubRequest(
     `${apiUrl}?ref=${encodeURIComponent(branch)}`
   );
 
   if (existing.ok) {
-    const data = await existing.json();
+    const current = await existing.json();
+
     return {
       ok: true,
       alreadyExists: true,
-      path,
-      sha: data.sha
+      path: filePath,
+      sha: current.sha
     };
   }
 
   if (existing.status !== 404) {
     return {
       ok: false,
-      error: `GitHub não conseguiu verificar o escudo (${existing.status}).`
+      error: `Não foi possível verificar o ficheiro no GitHub (${existing.status}).`
     };
   }
 
@@ -354,7 +467,7 @@ async function saveShield(teamName, imageData) {
     },
     body: JSON.stringify({
       message: `Adicionar escudo: ${cleanTeamName(teamName)}`,
-      content: encoded,
+      content: match[1],
       branch
     })
   });
@@ -364,19 +477,23 @@ async function saveShield(teamName, imageData) {
   if (!response.ok) {
     return {
       ok: false,
-      error: result?.message || `GitHub respondeu ${response.status}.`
+      error:
+        result?.message ||
+        `GitHub respondeu ${response.status}.`
     };
   }
 
   return {
     ok: true,
     alreadyExists: false,
-    path
+    path: filePath
   };
 }
 
 function requestBody(req) {
-  if (req.body && typeof req.body === "object") return req.body;
+  if (req.body && typeof req.body === "object") {
+    return req.body;
+  }
 
   try {
     return JSON.parse(req.body || "{}");
@@ -387,7 +504,9 @@ function requestBody(req) {
 
 export default async function handler(req, res) {
   try {
-    // POST is kept for compatibility with the existing manual-save flow.
+    /*
+     * Mantém a gravação manual existente.
+     */
     if (req.method === "POST") {
       const { team, dataUrl } = requestBody(req);
 
@@ -399,7 +518,9 @@ export default async function handler(req, res) {
 
       const saved = await saveShield(team, dataUrl);
 
-      return res.status(saved.ok ? 200 : 500).json(saved);
+      return res
+        .status(saved.ok ? 200 : 500)
+        .json(saved);
     }
 
     if (req.method !== "GET") {
@@ -408,7 +529,9 @@ export default async function handler(req, res) {
       });
     }
 
-    const team = cleanTeamName(req.query?.team || "");
+    const team = cleanTeamName(
+      req.query?.team || ""
+    );
 
     if (!team) {
       return res.status(400).json({
@@ -416,49 +539,75 @@ export default async function handler(req, res) {
       });
     }
 
-    // 1. Existing shield wins. No unnecessary network request.
+    /*
+     * =====================================================
+     * 1. CACHE LOCAL / GITHUB
+     * =====================================================
+     *
+     * Se já temos o escudo, não consultamos o ZeroZero.
+     */
     const cached = await findCachedShield(team);
+
     if (cached) {
       return res.status(200).json(cached);
     }
 
-    // 2. ZeroZero is the single source used to find and download the crest.
+    /*
+     * =====================================================
+     * 2. ZEROZERO
+     * =====================================================
+     *
+     * O ZeroZero é a única fonte de descoberta e download.
+     */
     const found = await findZeroZeroTeam(team);
 
-    const originalImage = await fetchImage(found.logoUrl);
+    const buffer = await downloadImage(found.logoUrl);
 
-    if (!originalImage) {
+    if (!buffer) {
       return res.status(404).json({
-        error: "O escudo encontrado no ZeroZero não pôde ser descarregado.",
+        error:
+          "A equipa foi encontrada no ZeroZero, mas o escudo não pôde ser descarregado.",
         zeroZeroName: found.zeroZeroName,
         zeroZeroPage: found.zeroZeroPage
       });
     }
 
-    const image = await imageDataUrl(originalImage);
+    /*
+     * Guardamos exactamente o escudo que veio do ZeroZero,
+     * apenas normalizado para PNG.
+     */
+    const imageDataUrl = await toPngDataUrl(buffer);
 
-    // 3. Save the exact ZeroZero crest as a normalized PNG.
-    const saved = await saveShield(team, image);
-
-    return res.status(saved.ok ? 200 : 502).json({
+    const saved = await saveShield(
       team,
-      matchedTeam: found.zeroZeroName,
-      zeroZeroPage: found.zeroZeroPage,
-      zeroZeroImage: found.logoUrl,
-      zeroZeroScore: found.zeroZeroScore,
-      imageDataUrl: image,
-      source: "ZeroZero",
-      verified: true,
-      saved: saved.ok,
-      savedPath: saved.path || null,
-      alreadyExists: saved.alreadyExists || false,
-      saveError: saved.ok ? null : saved.error
-    });
+      imageDataUrl
+    );
+
+    return res
+      .status(saved.ok ? 200 : 502)
+      .json({
+        team,
+        matchedTeam: found.zeroZeroName,
+        zeroZeroPage: found.zeroZeroPage,
+        zeroZeroImage: found.logoUrl,
+        zeroZeroScore: found.zeroZeroScore,
+        imageDataUrl,
+        source: "ZeroZero",
+        verified: true,
+        saved: saved.ok,
+        savedPath: saved.path || null,
+        alreadyExists: saved.alreadyExists || false,
+        saveError: saved.ok
+          ? null
+          : saved.error
+      });
   } catch (error) {
     console.error("[escudo]", error);
 
     return res.status(500).json({
-      error: error?.message || "Erro ao obter o escudo.",
+      error:
+        error?.message ||
+        "Erro ao procurar o escudo no ZeroZero.",
       source: "ZeroZero"
     });
   }
