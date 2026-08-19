@@ -1,166 +1,465 @@
 import sharp from "sharp";
 
-const UA="Mozilla/5.0 (compatible; NAF-Marques-Bom/1.0)";
-const ZZ="https://www.zerozero.pt";
-const norm=s=>String(s||"").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[ºª°]/g,"").replace(/["'.,/()\-]/g," ").replace(/\s+/g," ").trim();
-const clean=s=>String(s||"").trim().replace(/(?:\s+|\/)(?:OAF\s+SDUQ|SAD|SDUQ|OAF)\s*$/i,"").replace(/\s+/g," ").trim();
-const safe=s=>clean(s).replace(/[<>:"/\\|?*\u0000-\u001F]/g,"").trim();
-const score=(a,b)=>{a=norm(a);b=norm(b);if(!a||!b)return-1;if(a===b)return1000;if(a.includes(b)||b.includes(a))return700-Math.abs(a.length-b.length);const A=new Set(a.split(" ")),B=new Set(b.split(" "));return[...A].filter(x=>B.has(x)).length*50-Math.abs(a.length-b.length)};
-const gh=()=>({token:process.env.GITHUB_TOKEN,repo:process.env.GITHUB_REPO,branch:process.env.GITHUB_BRANCH||"main"});
+const ZEROZERO = "https://www.zerozero.pt";
+const UA = "Mozilla/5.0 (compatible; NAF-Marques-Bom/2.0)";
+const IMAGE_RE = /\/img\/logos\/equipas\//i;
 
-async function buf(url){try{const r=await fetch(url,{headers:{"User-Agent":UA,Accept:"image/*,*/*;q=0.8"}});if(!r.ok||!(r.headers.get("content-type")||"").toLowerCase().startsWith("image/"))return null;return Buffer.from(await r.arrayBuffer())}catch{return null}}
-async function data(b){const m=await sharp(b,{failOn:"none"}).metadata().catch(()=>({}));const t=m.format==="jpeg"||m.format==="jpg"?"image/jpeg":m.format==="webp"?"image/webp":"image/png";return`data:${t};base64,${b.toString("base64")}`}
-
-async function cache(team){
- const {token,repo,branch}=gh();if(!token||!repo)return null;
- try{
-  const h={Accept:"application/vnd.github+json",Authorization:`Bearer ${token}`,"X-GitHub-Api-Version":"2022-11-28"};
-  const r=await fetch(`https://api.github.com/repos/${repo}/contents/public/escudos?ref=${encodeURIComponent(branch)}`,{headers:h});if(!r.ok)return null;
-  const w=norm(safe(team)),f=(await r.json()).find(x=>x.type==="file"&&norm(x.name.replace(/\.(png|jpe?g|webp)$/i,""))===w);if(!f)return null;
-  const b=await buf(f.download_url);return b?{url:f.download_url,imageDataUrl:await data(b),source:"GitHub cache",team,cached:true}:null;
- }catch{return null}
+function normalize(value = "") {
+  return String(value)
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[ºª°]/g, "")
+    .replace(/["'.,/()\-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
-async function sourceTeams(name){
- const out=[];
- try{const r=await fetch(`https://www.thesportsdb.com/api/v1/json/123/searchteams.php?t=${encodeURIComponent(name)}`,{headers:{"User-Agent":UA}});if(r.ok)out.push(...((await r.json()).teams||[]).filter(x=>x.strBadge).map(x=>({score:score(name,x.strTeam),team:x.strTeam,url:x.strBadge,source:"TheSportsDB"})))}catch{}
- try{const r=await fetch(`https://www.sofascore.com/api/v1/search/all?q=${encodeURIComponent(name)}`,{headers:{"User-Agent":UA}});if(r.ok)out.push(...((await r.json()).results||[]).filter(x=>x?.entity?.type==="team"&&x.entity.id).map(x=>({score:score(name,x.entity.name),team:x.entity.name,url:`https://api.sofascore.com/api/v1/team/${x.entity.id}/image`,source:"SofaScore"})))}catch{}
- try{
-  const r=await fetch(`https://www.wikidata.org/w/api.php?action=wbsearchentities&search=${encodeURIComponent(name)}&language=pt&format=json&limit=8`,{headers:{"User-Agent":UA}});
-  if(r.ok){const ids=((await r.json()).search||[]).map(x=>x.id);if(ids.length){const e=await fetch(`https://www.wikidata.org/w/api.php?action=wbgetentities&ids=${ids.join("|")}&props=claims|labels&languages=pt|en&format=json`,{headers:{"User-Agent":UA}});if(e.ok){const es=(await e.json()).entities||{};for(const id of ids){const z=es[id],f=z?.claims?.P154?.[0]?.mainsnak?.datavalue?.value,l=z?.labels?.pt?.value||z?.labels?.en?.value||"";if(f)out.push({score:score(name,l),team:l,url:"https://commons.wikimedia.org/wiki/Special:FilePath/"+encodeURIComponent(String(f).replace(/^File:/i,"")),source:"Wikidata/Wikimedia Commons"})}}}}
- }catch{}
- for(const lang of ["pt","en"])try{const r=await fetch(`https://${lang}.wikipedia.org/w/api.php?action=query&generator=search&gsrsearch=${encodeURIComponent(name)}&gsrnamespace=0&prop=pageimages&piprop=original|thumbnail&pithumbsize=800&format=json`,{headers:{"User-Agent":UA}});if(r.ok)for(const x of Object.values((await r.json())?.query?.pages||{}))if(x.original?.source||x.thumbnail?.source)out.push({score:score(name,x.title),team:x.title,url:x.original?.source||x.thumbnail.source,source:`Wikipedia ${lang.toUpperCase()}`})}catch{}
- const seen=new Set();return out.sort((a,b)=>b.score-a.score).filter(x=>x.url&&!seen.has(x.url)&&(seen.add(x.url),true))
+function cleanTeamName(value = "") {
+  return String(value)
+    .replace(/\s+/g, " ")
+    .replace(/\s*\/\s*(?:OAF\s+SDUQ|SAD|SDUQ|OAF)\s*$/i, "")
+    .trim();
 }
 
-
-function absolute(base, u) {
-  try { return new URL(String(u).replace(/&amp;/g,"&"), base).href; } catch { return null; }
+function safeFilename(value = "") {
+  return cleanTeamName(value)
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-zA-Z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .toLowerCase() || "escudo";
 }
 
-function isImageUrl(u) {
-  return /\.(png|jpe?g|webp|svg)(?:[?#].*)?$/i.test(u || "") ||
-    /\/(logo|badge|emblem|escudo|crest)(?:[\/_.-]|$)/i.test(u || "");
-}
-
-async function officialSiteCandidates(site, name) {
-  if (!site) return [];
-  try {
-    const base = new URL(site);
-    const pages = [base.href, new URL("/club", base).href, new URL("/clube", base).href,
-      new URL("/historia", base).href, new URL("/sobre", base).href];
-    const out = [];
-    for (const page of [...new Set(pages)]) {
-      const r = await fetch(page, { headers: { "User-Agent": UA, Accept: "text/html" } });
-      if (!r.ok) continue;
-      const h = await r.text();
-      const found = [];
-      const meta = /<meta[^>]+(?:property|name)=["'](?:og:image|twitter:image)["'][^>]+content=["']([^"']+)["']/gi;
-      let m;
-      while ((m = meta.exec(h))) found.push(m[1]);
-      const img = /<img[^>]+(?:src|data-src)=["']([^"']+)["'][^>]*>/gi;
-      while ((m = img.exec(h))) {
-        const u = m[1];
-        if (isImageUrl(u)) found.push(u);
-      }
-      for (const u0 of found) {
-        const u = absolute(page, u0);
-        if (u) out.push({ score: score(name, name), team: name, url: u, source: "Site oficial do clube", officialSite: base.origin });
-      }
-    }
-    const seen = new Set();
-    return out.filter(x => !seen.has(x.url) && seen.add(x.url)).slice(0, 12);
-  } catch { return []; }
-}
-
-async function wikidataOfficialSite(name) {
-  try {
-    const r = await fetch(
-      `https://www.wikidata.org/w/api.php?action=wbsearchentities&search=${encodeURIComponent(name)}&language=pt&format=json&limit=8`,
-      { headers: { "User-Agent": UA } }
-    );
-    if (!r.ok) return [];
-    const ids = ((await r.json()).search || []).map(x => x.id);
-    if (!ids.length) return [];
-    const e = await fetch(
-      `https://www.wikidata.org/w/api.php?action=wbgetentities&ids=${ids.join("|")}&props=claims|labels&languages=pt|en&format=json`,
-      { headers: { "User-Agent": UA } }
-    );
-    if (!e.ok) return [];
-    const es = (await e.json()).entities || {};
-    const sites = [];
-    for (const id of ids) {
-      const z = es[id];
-      const label = z?.labels?.pt?.value || z?.labels?.en?.value || "";
-      const claim = z?.claims?.P856?.[0]?.mainsnak?.datavalue?.value;
-      if (claim && score(name, label) >= 500) sites.push({ site: claim, label });
-    }
-    return sites;
-  } catch { return []; }
-}
-
-async function officialCandidates(name, zeroPage) {
-  const sites = await wikidataOfficialSite(name);
-  // ZeroZero is also used as a discovery source for an external club website.
-  if (zeroPage) {
-    try {
-      const r = await fetch(zeroPage, { headers: { "User-Agent": UA, Accept: "text/html" } });
-      if (r.ok) {
-        const h = await r.text();
-        const re = /<a[^>]+href=["'](https?:\/\/[^"']+)["'][^>]*>/gi;
-        let m;
-        while ((m = re.exec(h))) {
-          try {
-            const u = new URL(m[1]);
-            if (!/zerozero\.pt$/i.test(u.hostname) && !/facebook|instagram|twitter|x\.com|youtube/i.test(u.hostname))
-              sites.push({ site: u.origin, label: name });
-          } catch {}
-        }
-      }
-    } catch {}
+function similarityScore(a, b) {
+  const x = normalize(a);
+  const y = normalize(b);
+  if (!x || !y) return -1;
+  if (x === y) return 1000;
+  if (x.includes(y) || y.includes(x)) {
+    return 700 - Math.abs(x.length - y.length);
   }
-  const unique = [], seen = new Set();
-  for (const x of sites) {
-    try {
-      const origin = new URL(x.site).origin;
-      if (!seen.has(origin)) { seen.add(origin); unique.push(origin); }
-    } catch {}
+
+  const ax = new Set(x.split(" "));
+  const by = new Set(y.split(" "));
+  const common = [...ax].filter((word) => by.has(word)).length;
+  return common * 60 - Math.abs(x.length - y.length);
+}
+
+function githubConfig() {
+  return {
+    token: process.env.GITHUB_TOKEN,
+    repo: process.env.GITHUB_REPO,
+    branch: process.env.GITHUB_BRANCH || "main"
+  };
+}
+
+async function fetchText(url) {
+  const response = await fetch(url, {
+    headers: {
+      "User-Agent": UA,
+      Accept: "text/html,application/xhtml+xml"
+    },
+    redirect: "follow"
+  });
+
+  if (!response.ok) {
+    throw new Error(`ZeroZero respondeu ${response.status}`);
   }
-  const all = [];
-  for (const site of unique.slice(0, 5)) all.push(...await officialSiteCandidates(site, name));
-  return all;
+
+  return response.text();
 }
 
-async function zero(name){
- try{
-  const r=await fetch(`${ZZ}/search.php?search_string=${encodeURIComponent(clean(name))}`,{headers:{"User-Agent":UA,Accept:"text/html"}});if(!r.ok)return null;
-  const h=await r.text(),a=[],re=/<a[^>]+href=["']([^"']*\/equipa\/[^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;let m;
-  while(m=re.exec(h)){const t=m[2].replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim(),s=score(name,t);if(s>=500)a.push({href:m[1],text:t,score:s})}
-  if(!a.length)return null;a.sort((x,y)=>y.score-x.score);const page=new URL(a[0].href,ZZ).href,p=await fetch(page,{headers:{"User-Agent":UA}});if(!p.ok)return null;
-  const b=await p.text(),abs=b.match(/https?:\/\/www\.zerozero\.pt\/img\/logos\/equipas\/[^"'<>\\s]+/i),rel=b.match(/(?:src|data-src)=["']([^"']*\/img\/logos\/equipas\/[^"']+)["']/i);let u=abs?.[0]||"";if(!u&&rel?.[1])u=new URL(rel[1].replace(/\\\//g,"/"),ZZ).href;return u?{team:a[0].text,url:u,page}:null
- }catch{return null}
+async function fetchImage(url) {
+  const response = await fetch(url, {
+    headers: {
+      "User-Agent": UA,
+      Accept: "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"
+    },
+    redirect: "follow"
+  });
+
+  if (!response.ok) return null;
+
+  const type = (response.headers.get("content-type") || "").toLowerCase();
+  if (!type.startsWith("image/")) return null;
+
+  return Buffer.from(await response.arrayBuffer());
 }
 
-async function pixels(b){return sharp(b,{failOn:"none"}).ensureAlpha().trim({background:{r:0,g:0,b:0,alpha:0}}).resize(96,96,{fit:"contain",background:{r:255,g:255,b:255,alpha:0}}).flatten({background:{r:255,g:255,b:255}}).removeAlpha().raw().toBuffer()}
-async function similarity(a,b){try{const[x,y]=await Promise.all([pixels(a),pixels(b)]);if(x.length!==y.length)return 0;let d=0,c=0,n=x.length/3;for(let i=0;i<x.length;i+=3){const q=(Math.abs(x[i]-y[i])+Math.abs(x[i+1]-y[i+1])+Math.abs(x[i+2]-y[i+2]))/3;d+=q;if(q<=28)c++}return Math.max(0,Math.min(1,(1-d/n/255)*.65+c/n*.35))}catch{return 0}}
-
-async function save(team,d){
- const {token,repo,branch}=gh();if(!token||!repo)return{ok:false,error:"GITHUB_TOKEN ou GITHUB_REPO não configurado."};
- const m=String(d).match(/^data:image\/(png|jpeg|jpg|webp);base64,(.+)$/i);if(!m)return{ok:false,error:"Imagem inválida."};
- const ext=m[1].toLowerCase()==="jpeg"?"jpg":m[1].toLowerCase(),path=`public/escudos/${safe(team)}.${ext}`,u=`https://api.github.com/repos/${repo}/contents/${encodeURIComponent(path).replace(/%2F/g,"/")}`,h={Accept:"application/vnd.github+json",Authorization:`Bearer ${token}`,"X-GitHub-Api-Version":"2022-11-28","Content-Type":"application/json"};
- try{const q=await fetch(`${u}?ref=${encodeURIComponent(branch)}`,{headers:h}),sha=q.ok?(await q.json()).sha:undefined;if(!q.ok&&q.status!==404)return{ok:false,error:`GitHub GET ${q.status}`};const r=await fetch(u,{method:"PUT",headers:h,body:JSON.stringify({message:`Adicionar escudo: ${safe(team)}`,content:m[2],branch,...sha?{sha}:{}})}),j=await r.json().catch(()=>({}));return r.ok?{ok:true,path}:{ok:false,error:j?.message||`GitHub PUT ${r.status}`}}catch(e){return{ok:false,error:e.message}}
+function absoluteUrl(base, value) {
+  try {
+    return new URL(String(value).replace(/&amp;/g, "&"), base).href;
+  } catch {
+    return null;
+  }
 }
 
-const body=req=>{if(req.body&&typeof req.body==="object")return req.body;try{return JSON.parse(req.body||"{}")}catch{return{}}};
+function stripHtml(value = "") {
+  return String(value)
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/\s+/g, " ")
+    .trim();
+}
 
-export default async function handler(req,res){
- if(req.method==="POST"){const{team,dataUrl}=body(req);if(!team||!dataUrl)return res.status(400).json({error:"team e dataUrl são obrigatórios."});const s=await save(team,dataUrl);return s.ok?res.status(200).json(s):res.status(500).json({error:s.error})}
- if(req.method!=="GET")return res.status(405).json({error:"Method not allowed"});
- const team=String(req.query?.team||"").trim();if(!team)return res.status(400).json({error:"team obrigatório"});
- try{
-  const c=await cache(team);if(c)return res.status(200).json(c);
-  const z=await zero(team); const official=await officialCandidates(team,z?.page||null); const list=[...official,...await sourceTeams(team)];
-  if(z){const ref=await buf(z.url);if(ref){for(const x of list){const b=await buf(x.url);if(!b)continue;const sim=await similarity(ref,b);if(sim<.88)continue;const d=await data(b),s=await save(team,d);return res.status(200).json({...x,imageDataUrl:d,verified:true,verificationSource:"ZeroZero",similarity:sim,zeroZeroTeam:z.team,zeroZeroPage:z.page,saved:s.ok,savedPath:s.path||null,saveError:s.ok?null:s.error})}return res.status(404).json({error:"Não foi encontrado um escudo visualmente igual ao do ZeroZero.",zeroZeroTeam:z.team,zeroZeroPage:z.page})}}
-  const x=list[0];if(!x)return res.status(404).json({error:"Escudo não encontrado."});const b=await buf(x.url);if(!b)return res.status(404).json({error:"Imagem do escudo indisponível."});const d=await data(b),s=await save(team,d);return res.status(200).json({...x,imageDataUrl:d,verified:false,saved:s.ok,savedPath:s.path||null,saveError:s.ok?null:s.error})
- }catch(e){console.error(e);return res.status(500).json({error:e?.message||"Erro na pesquisa do escudo."})}
+function extractTeamLinks(html) {
+  const result = [];
+  const seen = new Set();
+
+  const re =
+    /<a\b[^>]*href=["']([^"']*\/equipa\/[^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+
+  let match;
+  while ((match = re.exec(html))) {
+    const href = absoluteUrl(ZEROZERO, match[1]);
+    const label = stripHtml(match[2]);
+
+    if (!href || !label || seen.has(href)) continue;
+    if (label.length > 120) continue;
+
+    seen.add(href);
+    result.push({ url: href, name: label });
+  }
+
+  return result;
+}
+
+function extractLogoCandidates(html, pageUrl) {
+  const candidates = [];
+  const add = (value) => {
+    const url = absoluteUrl(pageUrl, value);
+    if (!url || !IMAGE_RE.test(url)) return;
+    if (!candidates.includes(url)) candidates.push(url);
+  };
+
+  // Direct image URLs.
+  const direct =
+    /https?:\/\/[^"'<>\\s]+\/img\/logos\/equipas\/[^"'<>\\s]+/gi;
+
+  for (const match of html.matchAll(direct)) {
+    add(match[0]);
+  }
+
+  // src/data-src/data-original.
+  const attributes =
+    /(?:src|data-src|data-original|content)=["']([^"']*\/img\/logos\/equipas\/[^"']+)["']/gi;
+
+  for (const match of html.matchAll(attributes)) {
+    add(match[1]);
+  }
+
+  // srcset.
+  const srcset = /srcset=["']([^"']+)["']/gi;
+  for (const match of html.matchAll(srcset)) {
+    for (const item of match[1].split(",")) {
+      add(item.trim().split(/\s+/)[0]);
+    }
+  }
+
+  return candidates;
+}
+
+async function findZeroZeroTeam(teamName) {
+  const query = cleanTeamName(teamName);
+
+  const searchUrls = [
+    `${ZEROZERO}/search.php?search_string=${encodeURIComponent(query)}`,
+    `${ZEROZERO}/pesquisa?query=${encodeURIComponent(query)}`
+  ];
+
+  const candidates = [];
+
+  for (const searchUrl of searchUrls) {
+    try {
+      const html = await fetchText(searchUrl);
+      candidates.push(...extractTeamLinks(html));
+      if (candidates.length) break;
+    } catch {
+      // Try the next known ZeroZero search format.
+    }
+  }
+
+  if (!candidates.length) {
+    throw new Error(`Equipa "${query}" não encontrada no ZeroZero.`);
+  }
+
+  const ranked = candidates
+    .map((item) => ({
+      ...item,
+      score: similarityScore(query, item.name)
+    }))
+    .sort((a, b) => b.score - a.score);
+
+  const best = ranked[0];
+
+  // Never accept a weak match. This prevents "Sporting" from becoming
+  // an unrelated Sporting team just because it appeared first.
+  if (best.score < 500) {
+    throw new Error(
+      `O resultado do ZeroZero não foi suficientemente seguro para "${query}".`
+    );
+  }
+
+  const pageHtml = await fetchText(best.url);
+  const logos = extractLogoCandidates(pageHtml, best.url);
+
+  if (!logos.length) {
+    throw new Error(
+      `A página do ZeroZero para "${best.name}" não contém o escudo esperado.`
+    );
+  }
+
+  return {
+    requestedName: query,
+    zeroZeroName: best.name,
+    zeroZeroPage: best.url,
+    zeroZeroScore: best.score,
+    logoUrl: logos[0]
+  };
+}
+
+async function imageDataUrl(buffer) {
+  const png = await sharp(buffer, { failOn: "none" })
+    .rotate()
+    .ensureAlpha()
+    .png()
+    .toBuffer();
+
+  return `data:image/png;base64,${png.toString("base64")}`;
+}
+
+async function githubRequest(url, options = {}) {
+  const { token } = githubConfig();
+
+  if (!token) {
+    throw new Error("GITHUB_TOKEN não está configurado na Vercel.");
+  }
+
+  return fetch(url, {
+    ...options,
+    headers: {
+      Accept: "application/vnd.github+json",
+      Authorization: `Bearer ${token}`,
+      "X-GitHub-Api-Version": "2022-11-28",
+      ...(options.headers || {})
+    }
+  });
+}
+
+async function findCachedShield(teamName) {
+  const { repo, branch } = githubConfig();
+  if (!repo) return null;
+
+  const url =
+    `https://api.github.com/repos/${repo}/contents/public/escudos` +
+    `?ref=${encodeURIComponent(branch)}`;
+
+  try {
+    const response = await githubRequest(url);
+    if (!response.ok) return null;
+
+    const files = await response.json();
+    const wanted = safeFilename(teamName);
+
+    const file = files.find((item) => {
+      if (item.type !== "file") return false;
+
+      const filename = item.name
+        .replace(/\.(png|jpe?g|webp|svg)$/i, "");
+
+      return safeFilename(filename) === wanted;
+    });
+
+    if (!file?.download_url) return null;
+
+    const image = await fetchImage(file.download_url);
+    if (!image) return null;
+
+    return {
+      team: teamName,
+      imageDataUrl: await imageDataUrl(image),
+      url: file.download_url,
+      source: "GitHub",
+      cached: true,
+      verified: true
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function saveShield(teamName, imageData) {
+  const { repo, branch } = githubConfig();
+
+  if (!repo) {
+    return {
+      ok: false,
+      error: "GITHUB_REPO não está configurado na Vercel."
+    };
+  }
+
+  const match = String(imageData).match(
+    /^data:image\/png;base64,(.+)$/i
+  );
+
+  if (!match) {
+    return {
+      ok: false,
+      error: "A imagem a guardar não está no formato PNG esperado."
+    };
+  }
+
+  const filename = `${safeFilename(teamName)}.png`;
+  const path = `public/escudos/${filename}`;
+
+  const apiUrl =
+    `https://api.github.com/repos/${repo}/contents/` +
+    path.split("/").map(encodeURIComponent).join("/");
+
+  const encoded = match[1];
+
+  // Check whether the file already exists. If it does, never overwrite it
+  // automatically: a previously saved shield is considered authoritative.
+  const existing = await githubRequest(
+    `${apiUrl}?ref=${encodeURIComponent(branch)}`
+  );
+
+  if (existing.ok) {
+    const data = await existing.json();
+    return {
+      ok: true,
+      alreadyExists: true,
+      path,
+      sha: data.sha
+    };
+  }
+
+  if (existing.status !== 404) {
+    return {
+      ok: false,
+      error: `GitHub não conseguiu verificar o escudo (${existing.status}).`
+    };
+  }
+
+  const response = await githubRequest(apiUrl, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      message: `Adicionar escudo: ${cleanTeamName(teamName)}`,
+      content: encoded,
+      branch
+    })
+  });
+
+  const result = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    return {
+      ok: false,
+      error: result?.message || `GitHub respondeu ${response.status}.`
+    };
+  }
+
+  return {
+    ok: true,
+    alreadyExists: false,
+    path
+  };
+}
+
+function requestBody(req) {
+  if (req.body && typeof req.body === "object") return req.body;
+
+  try {
+    return JSON.parse(req.body || "{}");
+  } catch {
+    return {};
+  }
+}
+
+export default async function handler(req, res) {
+  try {
+    // POST is kept for compatibility with the existing manual-save flow.
+    if (req.method === "POST") {
+      const { team, dataUrl } = requestBody(req);
+
+      if (!team || !dataUrl) {
+        return res.status(400).json({
+          error: "team e dataUrl são obrigatórios."
+        });
+      }
+
+      const saved = await saveShield(team, dataUrl);
+
+      return res.status(saved.ok ? 200 : 500).json(saved);
+    }
+
+    if (req.method !== "GET") {
+      return res.status(405).json({
+        error: "Method not allowed"
+      });
+    }
+
+    const team = cleanTeamName(req.query?.team || "");
+
+    if (!team) {
+      return res.status(400).json({
+        error: "Indica o nome da equipa."
+      });
+    }
+
+    // 1. Existing shield wins. No unnecessary network request.
+    const cached = await findCachedShield(team);
+    if (cached) {
+      return res.status(200).json(cached);
+    }
+
+    // 2. ZeroZero is the single source used to find and download the crest.
+    const found = await findZeroZeroTeam(team);
+
+    const originalImage = await fetchImage(found.logoUrl);
+
+    if (!originalImage) {
+      return res.status(404).json({
+        error: "O escudo encontrado no ZeroZero não pôde ser descarregado.",
+        zeroZeroName: found.zeroZeroName,
+        zeroZeroPage: found.zeroZeroPage
+      });
+    }
+
+    const image = await imageDataUrl(originalImage);
+
+    // 3. Save the exact ZeroZero crest as a normalized PNG.
+    const saved = await saveShield(team, image);
+
+    return res.status(saved.ok ? 200 : 502).json({
+      team,
+      matchedTeam: found.zeroZeroName,
+      zeroZeroPage: found.zeroZeroPage,
+      zeroZeroImage: found.logoUrl,
+      zeroZeroScore: found.zeroZeroScore,
+      imageDataUrl: image,
+      source: "ZeroZero",
+      verified: true,
+      saved: saved.ok,
+      savedPath: saved.path || null,
+      alreadyExists: saved.alreadyExists || false,
+      saveError: saved.ok ? null : saved.error
+    });
+  } catch (error) {
+    console.error("[escudo]", error);
+
+    return res.status(500).json({
+      error: error?.message || "Erro ao obter o escudo.",
+      source: "ZeroZero"
+    });
+  }
 }
