@@ -758,48 +758,36 @@ async function processAndStorePhoto(name, file) {
 
 
 /* =========================================================
-   ESCUDOS
+   ESCUDOS — PESQUISA LOCAL + ZEROZERO
    ========================================================= */
 
 function teamVariants(team) {
   const a = new Set([
-    team.trim(),
+    String(team || '').trim(),
 
-    team
+    String(team || '')
       .replace(/\s*\/\s*OAF\b/ig, '')
       .replace(/\bSAD\b/ig, '')
       .replace(/\bSDUQ\b/ig, '')
+      .replace(/\s+/g, ' ')
       .trim(),
 
-    team
+    String(team || '')
       .replace(/[,.]/g, '')
+      .replace(/\s+/g, ' ')
       .trim()
   ]);
 
   return [...a].filter(Boolean);
 }
 
-
-/*
- * PESQUISA ONLINE
- *
- * Esta função só é chamada depois de terminar
- * a pesquisa LOCAL de todos os clubes.
- */
-async function searchRemoteShield(
-  team,
-  timeoutMs = 4500
-) {
+async function searchRemoteShield(team, timeoutMs = 30000) {
   const key = 'remoteShield:' + compact(team);
 
   const cached = state.assets.get(key);
-
-  if (cached) {
-    return cached;
-  }
+  if (cached) return cached;
 
   const controller = new AbortController();
-
   const timer = setTimeout(
     () => controller.abort(),
     timeoutMs
@@ -816,38 +804,24 @@ async function searchRemoteShield(
       }
     );
 
-    if (!r.ok) {
-      return null;
-    }
+    if (!r.ok) return null;
 
     const data = await r.json();
-
     const imageSrc = data?.imageDataUrl;
 
-    if (!imageSrc) {
-      return null;
-    }
+    if (!imageSrc) return null;
 
     const img = await tryImage(imageSrc);
-
-    if (!img) {
-      return null;
-    }
+    if (!img) return null;
 
     state.assets.set(key, img);
-
-    state.assets.set(
-      's:' + compact(team),
-      img
-    );
-
+    state.assets.set('s:' + compact(team), img);
     state.assets.set(
       'source:' + compact(team),
-      data.source || ''
+      data.source || 'ZeroZero'
     );
 
     return img;
-
   } catch (e) {
     if (e?.name !== 'AbortError') {
       console.warn(
@@ -858,20 +832,11 @@ async function searchRemoteShield(
     }
 
     return null;
-
   } finally {
     clearTimeout(timer);
   }
 }
 
-
-/*
- * PESQUISA LOCAL
- *
- * IMPORTANTE:
- * Esta função é executada para TODOS os clubes
- * antes de qualquer pesquisa online.
- */
 async function shieldLocalImage(team) {
   const key = 's:' + compact(team);
 
@@ -882,9 +847,6 @@ async function shieldLocalImage(team) {
   for (const v of teamVariants(team)) {
     const f = safeFile(v);
 
-    /*
-     * PNG primeiro porque é o formato habitual.
-     */
     for (const ext of [
       'png',
       'jpg',
@@ -897,7 +859,6 @@ async function shieldLocalImage(team) {
 
       if (img) {
         state.assets.set(key, img);
-
         state.assets.set(
           'source:' + compact(team),
           'Biblioteca local do Núcleo'
@@ -911,42 +872,76 @@ async function shieldLocalImage(team) {
   return null;
 }
 
-
-/*
- * FASE 1:
- * Apenas pesquisa local.
- */
 async function prepareOneShieldLocal(team) {
   return !!(await shieldLocalImage(team));
 }
 
-
 /*
- * PREFETCH DOS ESCUDOS
- *
- * ORDEM OBRIGATÓRIA:
- *
- * 1. Procurar TODOS localmente.
- * 2. Identificar os que faltam.
- * 3. Só depois pesquisar online os que faltam.
+ * IMPORTANTE:
+ * - primeiro TODOS os clubes locais;
+ * - só depois os que faltam;
+ * - nunca dispara 48 pedidos simultâneos.
  */
 async function prefetchShields(games) {
   const teams = new Map();
 
   for (const g of games) {
-    teams.set(
-      compact(g.home),
-      g.home
-    );
-
-    teams.set(
-      compact(g.away),
-      g.away
-    );
+    teams.set(compact(g.home), g.home);
+    teams.set(compact(g.away), g.away);
   }
 
   const uniqueTeams = [...teams.values()];
   const started = performance.now();
+
+  await Promise.all(
+    uniqueTeams.map(team => prepareOneShieldLocal(team))
+  );
+
+  const missingTeams = uniqueTeams.filter(
+    team => !state.assets.has('s:' + compact(team))
+  );
+
+  let onlineFound = 0;
+
+  /*
+   * Máximo 3 pedidos simultâneos.
+   * Isto é essencial: evita bombardear o ZeroZero e evita
+   * que todas as requests expirem ao mesmo tempo.
+   */
+  for (let i = 0; i < missingTeams.length; i += 3) {
+    const batch = missingTeams.slice(i, i + 3);
+
+    const results = await Promise.all(
+      batch.map(team => searchRemoteShield(team, 30000))
+    );
+
+    onlineFound += results.filter(Boolean).length;
+
+    const processed = Math.min(
+      i + batch.length,
+      missingTeams.length
+    );
+
+    setStatus(
+      `Escudos: ${uniqueTeams.length - missingTeams.length + processed}/${uniqueTeams.length} preparados. Local: ${uniqueTeams.length - missingTeams.length}. Online: ${onlineFound}.`
+    );
+  }
+
+  const found = uniqueTeams.filter(
+    team => state.assets.has('s:' + compact(team))
+  ).length;
+
+  const localFound =
+    uniqueTeams.length - missingTeams.length;
+
+  return {
+    total: uniqueTeams.length,
+    found,
+    local: localFound,
+    online: found - localFound,
+    seconds: (performance.now() - started) / 1000
+  };
+}
 
   /*
    * ======================================================
