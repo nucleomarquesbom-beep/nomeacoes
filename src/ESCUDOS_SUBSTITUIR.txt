@@ -1,0 +1,185 @@
+/* =========================================================
+   ESCUDOS — PESQUISA LOCAL + ZEROZERO
+   ========================================================= */
+
+function teamVariants(team) {
+  const a = new Set([
+    String(team || '').trim(),
+
+    String(team || '')
+      .replace(/\s*\/\s*OAF\b/ig, '')
+      .replace(/\bSAD\b/ig, '')
+      .replace(/\bSDUQ\b/ig, '')
+      .replace(/\s+/g, ' ')
+      .trim(),
+
+    String(team || '')
+      .replace(/[,.]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+  ]);
+
+  return [...a].filter(Boolean);
+}
+
+async function searchRemoteShield(team, timeoutMs = 30000) {
+  const key = 'remoteShield:' + compact(team);
+
+  const cached = state.assets.get(key);
+  if (cached) return cached;
+
+  const controller = new AbortController();
+  const timer = setTimeout(
+    () => controller.abort(),
+    timeoutMs
+  );
+
+  try {
+    const r = await fetch(
+      `/api/escudo?team=${encodeURIComponent(team)}`,
+      {
+        headers: {
+          'Accept': 'application/json'
+        },
+        signal: controller.signal
+      }
+    );
+
+    if (!r.ok) return null;
+
+    const data = await r.json();
+    const imageSrc = data?.imageDataUrl;
+
+    if (!imageSrc) return null;
+
+    const img = await tryImage(imageSrc);
+    if (!img) return null;
+
+    state.assets.set(key, img);
+    state.assets.set('s:' + compact(team), img);
+    state.assets.set(
+      'source:' + compact(team),
+      data.source || 'ZeroZero'
+    );
+
+    return img;
+  } catch (e) {
+    if (e?.name !== 'AbortError') {
+      console.warn(
+        'Pesquisa automática de escudo falhou:',
+        team,
+        e
+      );
+    }
+
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function shieldLocalImage(team) {
+  const key = 's:' + compact(team);
+
+  if (state.assets.has(key)) {
+    return state.assets.get(key);
+  }
+
+  for (const v of teamVariants(team)) {
+    const f = safeFile(v);
+
+    for (const ext of [
+      'png',
+      'jpg',
+      'jpeg',
+      'webp'
+    ]) {
+      const img = await tryImage(
+        `/escudos/${f}.${ext}?v=5`
+      );
+
+      if (img) {
+        state.assets.set(key, img);
+        state.assets.set(
+          'source:' + compact(team),
+          'Biblioteca local do Núcleo'
+        );
+
+        return img;
+      }
+    }
+  }
+
+  return null;
+}
+
+async function prepareOneShieldLocal(team) {
+  return !!(await shieldLocalImage(team));
+}
+
+/*
+ * IMPORTANTE:
+ * - primeiro TODOS os clubes locais;
+ * - só depois os que faltam;
+ * - nunca dispara 48 pedidos simultâneos.
+ */
+async function prefetchShields(games) {
+  const teams = new Map();
+
+  for (const g of games) {
+    teams.set(compact(g.home), g.home);
+    teams.set(compact(g.away), g.away);
+  }
+
+  const uniqueTeams = [...teams.values()];
+  const started = performance.now();
+
+  await Promise.all(
+    uniqueTeams.map(team => prepareOneShieldLocal(team))
+  );
+
+  const missingTeams = uniqueTeams.filter(
+    team => !state.assets.has('s:' + compact(team))
+  );
+
+  let onlineFound = 0;
+
+  /*
+   * Máximo 3 pedidos simultâneos.
+   * Isto é essencial: evita bombardear o ZeroZero e evita
+   * que todas as requests expirem ao mesmo tempo.
+   */
+  for (let i = 0; i < missingTeams.length; i += 3) {
+    const batch = missingTeams.slice(i, i + 3);
+
+    const results = await Promise.all(
+      batch.map(team => searchRemoteShield(team, 30000))
+    );
+
+    onlineFound += results.filter(Boolean).length;
+
+    const processed = Math.min(
+      i + batch.length,
+      missingTeams.length
+    );
+
+    setStatus(
+      `Escudos: ${uniqueTeams.length - missingTeams.length + processed}/${uniqueTeams.length} preparados. Local: ${uniqueTeams.length - missingTeams.length}. Online: ${onlineFound}.`
+    );
+  }
+
+  const found = uniqueTeams.filter(
+    team => state.assets.has('s:' + compact(team))
+  ).length;
+
+  const localFound =
+    uniqueTeams.length - missingTeams.length;
+
+  return {
+    total: uniqueTeams.length,
+    found,
+    local: localFound,
+    online: found - localFound,
+    seconds: (performance.now() - started) / 1000
+  };
+}
