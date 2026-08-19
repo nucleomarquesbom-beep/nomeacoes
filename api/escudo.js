@@ -33,6 +33,104 @@ async function sourceTeams(name){
  const seen=new Set();return out.sort((a,b)=>b.score-a.score).filter(x=>x.url&&!seen.has(x.url)&&(seen.add(x.url),true))
 }
 
+
+function absolute(base, u) {
+  try { return new URL(String(u).replace(/&amp;/g,"&"), base).href; } catch { return null; }
+}
+
+function isImageUrl(u) {
+  return /\.(png|jpe?g|webp|svg)(?:[?#].*)?$/i.test(u || "") ||
+    /\/(logo|badge|emblem|escudo|crest)(?:[\/_.-]|$)/i.test(u || "");
+}
+
+async function officialSiteCandidates(site, name) {
+  if (!site) return [];
+  try {
+    const base = new URL(site);
+    const pages = [base.href, new URL("/club", base).href, new URL("/clube", base).href,
+      new URL("/historia", base).href, new URL("/sobre", base).href];
+    const out = [];
+    for (const page of [...new Set(pages)]) {
+      const r = await fetch(page, { headers: { "User-Agent": UA, Accept: "text/html" } });
+      if (!r.ok) continue;
+      const h = await r.text();
+      const found = [];
+      const meta = /<meta[^>]+(?:property|name)=["'](?:og:image|twitter:image)["'][^>]+content=["']([^"']+)["']/gi;
+      let m;
+      while ((m = meta.exec(h))) found.push(m[1]);
+      const img = /<img[^>]+(?:src|data-src)=["']([^"']+)["'][^>]*>/gi;
+      while ((m = img.exec(h))) {
+        const u = m[1];
+        if (isImageUrl(u)) found.push(u);
+      }
+      for (const u0 of found) {
+        const u = absolute(page, u0);
+        if (u) out.push({ score: score(name, name), team: name, url: u, source: "Site oficial do clube", officialSite: base.origin });
+      }
+    }
+    const seen = new Set();
+    return out.filter(x => !seen.has(x.url) && seen.add(x.url)).slice(0, 12);
+  } catch { return []; }
+}
+
+async function wikidataOfficialSite(name) {
+  try {
+    const r = await fetch(
+      `https://www.wikidata.org/w/api.php?action=wbsearchentities&search=${encodeURIComponent(name)}&language=pt&format=json&limit=8`,
+      { headers: { "User-Agent": UA } }
+    );
+    if (!r.ok) return [];
+    const ids = ((await r.json()).search || []).map(x => x.id);
+    if (!ids.length) return [];
+    const e = await fetch(
+      `https://www.wikidata.org/w/api.php?action=wbgetentities&ids=${ids.join("|")}&props=claims|labels&languages=pt|en&format=json`,
+      { headers: { "User-Agent": UA } }
+    );
+    if (!e.ok) return [];
+    const es = (await e.json()).entities || {};
+    const sites = [];
+    for (const id of ids) {
+      const z = es[id];
+      const label = z?.labels?.pt?.value || z?.labels?.en?.value || "";
+      const claim = z?.claims?.P856?.[0]?.mainsnak?.datavalue?.value;
+      if (claim && score(name, label) >= 500) sites.push({ site: claim, label });
+    }
+    return sites;
+  } catch { return []; }
+}
+
+async function officialCandidates(name, zeroPage) {
+  const sites = await wikidataOfficialSite(name);
+  // ZeroZero is also used as a discovery source for an external club website.
+  if (zeroPage) {
+    try {
+      const r = await fetch(zeroPage, { headers: { "User-Agent": UA, Accept: "text/html" } });
+      if (r.ok) {
+        const h = await r.text();
+        const re = /<a[^>]+href=["'](https?:\/\/[^"']+)["'][^>]*>/gi;
+        let m;
+        while ((m = re.exec(h))) {
+          try {
+            const u = new URL(m[1]);
+            if (!/zerozero\.pt$/i.test(u.hostname) && !/facebook|instagram|twitter|x\.com|youtube/i.test(u.hostname))
+              sites.push({ site: u.origin, label: name });
+          } catch {}
+        }
+      }
+    } catch {}
+  }
+  const unique = [], seen = new Set();
+  for (const x of sites) {
+    try {
+      const origin = new URL(x.site).origin;
+      if (!seen.has(origin)) { seen.add(origin); unique.push(origin); }
+    } catch {}
+  }
+  const all = [];
+  for (const site of unique.slice(0, 5)) all.push(...await officialSiteCandidates(site, name));
+  return all;
+}
+
 async function zero(name){
  try{
   const r=await fetch(`${ZZ}/search.php?search_string=${encodeURIComponent(clean(name))}`,{headers:{"User-Agent":UA,Accept:"text/html"}});if(!r.ok)return null;
@@ -61,7 +159,7 @@ export default async function handler(req,res){
  const team=String(req.query?.team||"").trim();if(!team)return res.status(400).json({error:"team obrigatório"});
  try{
   const c=await cache(team);if(c)return res.status(200).json(c);
-  const z=await zero(team),list=await sourceTeams(team);
+  const z=await zero(team); const official=await officialCandidates(team,z?.page||null); const list=[...official,...await sourceTeams(team)];
   if(z){const ref=await buf(z.url);if(ref){for(const x of list){const b=await buf(x.url);if(!b)continue;const sim=await similarity(ref,b);if(sim<.88)continue;const d=await data(b),s=await save(team,d);return res.status(200).json({...x,imageDataUrl:d,verified:true,verificationSource:"ZeroZero",similarity:sim,zeroZeroTeam:z.team,zeroZeroPage:z.page,saved:s.ok,savedPath:s.path||null,saveError:s.ok?null:s.error})}return res.status(404).json({error:"Não foi encontrado um escudo visualmente igual ao do ZeroZero.",zeroZeroTeam:z.team,zeroZeroPage:z.page})}}
   const x=list[0];if(!x)return res.status(404).json({error:"Escudo não encontrado."});const b=await buf(x.url);if(!b)return res.status(404).json({error:"Imagem do escudo indisponível."});const d=await data(b),s=await save(team,d);return res.status(200).json({...x,imageDataUrl:d,verified:false,saved:s.ok,savedPath:s.path||null,saveError:s.ok?null:s.error})
  }catch(e){console.error(e);return res.status(500).json({error:e?.message||"Erro na pesquisa do escudo."})}
