@@ -723,71 +723,133 @@ async function saveProcessedPhoto(name, dataUrl) {
   }
 }
 
-function fileToDataUrl(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result);
-    reader.onerror = () => reject(reader.error || new Error('Não foi possível ler a fotografia.'));
-    reader.readAsDataURL(file);
-  });
-}
-
-async function processAndStorePhoto(name, file) {
+async function processAndStorePhoto(
+  name,
+  file
+) {
   if (!file) return null;
 
   try {
-    const dataUrl = await fileToDataUrl(file);
-    const img = await tryImage(dataUrl);
-    if (!img) throw new Error('A fotografia não pôde ser carregada.');
+    const {
+      removeBackground
+    } = await import(
+      './photo-processing.js'
+    );
 
-    state.assets.set('p:' + compact(name), img);
+    const result =
+      await removeBackground(file);
 
-    let saved = false;
-    try {
-      saved = await saveProcessedPhoto(name, dataUrl);
-    } catch (error) {
-      console.warn('Fotografia carregada, mas não foi possível guardá-la:', error);
+    if (!result?.dataUrl) {
+      throw new Error(
+        'A remoção do fundo não devolveu uma imagem válida.'
+      );
     }
 
-    return { img, saved };
+    const img =
+      await tryImage(result.dataUrl);
+
+    if (!img) {
+      throw new Error(
+        'A fotografia processada não pôde ser carregada.'
+      );
+    }
+
+    state.assets.set(
+      'p:' + compact(name),
+      img
+    );
+
+    /*
+     * Persistência. Não bloqueia a utilização da
+     * fotografia se a gravação remota falhar.
+     */
+    const saved =
+      await saveProcessedPhoto(
+        name,
+        result.dataUrl
+      );
+
+    return {
+      img,
+      saved
+    };
+
   } catch (error) {
-    console.error('Falha ao carregar a fotografia:', name, error);
-    return null;
+    console.error(
+      'Falha no processamento da fotografia:',
+      name,
+      error
+    );
+
+    /*
+     * Fallback seguro: se a remoção automática falhar,
+     * ainda utilizamos a fotografia original nesta sessão.
+     */
+    try {
+      const img =
+        await fileToImage(file);
+
+      state.assets.set(
+        'p:' + compact(name),
+        img
+      );
+
+      return {
+        img,
+        saved: false,
+        fallback: true
+      };
+
+    } catch {
+      return null;
+    }
   }
 }
 
 
 /* =========================================================
-   ESCUDOS — PESQUISA LOCAL + ZEROZERO
+   ESCUDOS
    ========================================================= */
 
 function teamVariants(team) {
   const a = new Set([
-    String(team || '').trim(),
+    team.trim(),
 
-    String(team || '')
+    team
       .replace(/\s*\/\s*OAF\b/ig, '')
       .replace(/\bSAD\b/ig, '')
       .replace(/\bSDUQ\b/ig, '')
-      .replace(/\s+/g, ' ')
       .trim(),
 
-    String(team || '')
+    team
       .replace(/[,.]/g, '')
-      .replace(/\s+/g, ' ')
       .trim()
   ]);
 
   return [...a].filter(Boolean);
 }
 
-async function searchRemoteShield(team, timeoutMs = 30000) {
+
+/*
+ * PESQUISA ONLINE
+ *
+ * Esta função só é chamada depois de terminar
+ * a pesquisa LOCAL de todos os clubes.
+ */
+async function searchRemoteShield(
+  team,
+  timeoutMs = 30000
+) {
   const key = 'remoteShield:' + compact(team);
 
   const cached = state.assets.get(key);
-  if (cached) return cached;
+
+  if (cached) {
+    return cached;
+  }
 
   const controller = new AbortController();
+
   const timer = setTimeout(
     () => controller.abort(),
     timeoutMs
@@ -804,24 +866,38 @@ async function searchRemoteShield(team, timeoutMs = 30000) {
       }
     );
 
-    if (!r.ok) return null;
+    if (!r.ok) {
+      return null;
+    }
 
     const data = await r.json();
+
     const imageSrc = data?.imageDataUrl;
 
-    if (!imageSrc) return null;
+    if (!imageSrc) {
+      return null;
+    }
 
     const img = await tryImage(imageSrc);
-    if (!img) return null;
+
+    if (!img) {
+      return null;
+    }
 
     state.assets.set(key, img);
-    state.assets.set('s:' + compact(team), img);
+
+    state.assets.set(
+      's:' + compact(team),
+      img
+    );
+
     state.assets.set(
       'source:' + compact(team),
-      data.source || 'ZeroZero'
+      data.source || ''
     );
 
     return img;
+
   } catch (e) {
     if (e?.name !== 'AbortError') {
       console.warn(
@@ -832,11 +908,20 @@ async function searchRemoteShield(team, timeoutMs = 30000) {
     }
 
     return null;
+
   } finally {
     clearTimeout(timer);
   }
 }
 
+
+/*
+ * PESQUISA LOCAL
+ *
+ * IMPORTANTE:
+ * Esta função é executada para TODOS os clubes
+ * antes de qualquer pesquisa online.
+ */
 async function shieldLocalImage(team) {
   const key = 's:' + compact(team);
 
@@ -847,6 +932,9 @@ async function shieldLocalImage(team) {
   for (const v of teamVariants(team)) {
     const f = safeFile(v);
 
+    /*
+     * PNG primeiro porque é o formato habitual.
+     */
     for (const ext of [
       'png',
       'jpg',
@@ -859,6 +947,7 @@ async function shieldLocalImage(team) {
 
       if (img) {
         state.assets.set(key, img);
+
         state.assets.set(
           'source:' + compact(team),
           'Biblioteca local do Núcleo'
@@ -872,76 +961,42 @@ async function shieldLocalImage(team) {
   return null;
 }
 
+
+/*
+ * FASE 1:
+ * Apenas pesquisa local.
+ */
 async function prepareOneShieldLocal(team) {
   return !!(await shieldLocalImage(team));
 }
 
+
 /*
- * IMPORTANTE:
- * - primeiro TODOS os clubes locais;
- * - só depois os que faltam;
- * - nunca dispara 48 pedidos simultâneos.
+ * PREFETCH DOS ESCUDOS
+ *
+ * ORDEM OBRIGATÓRIA:
+ *
+ * 1. Procurar TODOS localmente.
+ * 2. Identificar os que faltam.
+ * 3. Só depois pesquisar online os que faltam.
  */
 async function prefetchShields(games) {
   const teams = new Map();
 
   for (const g of games) {
-    teams.set(compact(g.home), g.home);
-    teams.set(compact(g.away), g.away);
+    teams.set(
+      compact(g.home),
+      g.home
+    );
+
+    teams.set(
+      compact(g.away),
+      g.away
+    );
   }
 
   const uniqueTeams = [...teams.values()];
   const started = performance.now();
-
-  await Promise.all(
-    uniqueTeams.map(team => prepareOneShieldLocal(team))
-  );
-
-  const missingTeams = uniqueTeams.filter(
-    team => !state.assets.has('s:' + compact(team))
-  );
-
-  let onlineFound = 0;
-
-  /*
-   * Máximo 3 pedidos simultâneos.
-   * Isto é essencial: evita bombardear o ZeroZero e evita
-   * que todas as requests expirem ao mesmo tempo.
-   */
-  for (let i = 0; i < missingTeams.length; i += 3) {
-    const batch = missingTeams.slice(i, i + 3);
-
-    const results = await Promise.all(
-      batch.map(team => searchRemoteShield(team, 30000))
-    );
-
-    onlineFound += results.filter(Boolean).length;
-
-    const processed = Math.min(
-      i + batch.length,
-      missingTeams.length
-    );
-
-    setStatus(
-      `Escudos: ${uniqueTeams.length - missingTeams.length + processed}/${uniqueTeams.length} preparados. Local: ${uniqueTeams.length - missingTeams.length}. Online: ${onlineFound}.`
-    );
-  }
-
-  const found = uniqueTeams.filter(
-    team => state.assets.has('s:' + compact(team))
-  ).length;
-
-  const localFound =
-    uniqueTeams.length - missingTeams.length;
-
-  return {
-    total: uniqueTeams.length,
-    found,
-    local: localFound,
-    online: found - localFound,
-    seconds: (performance.now() - started) / 1000
-  };
-}
 
   /*
    * ======================================================
@@ -976,11 +1031,17 @@ async function prefetchShields(games) {
    * Só os que não foram encontrados localmente.
    */
 
-  await Promise.all(
-    missingTeams.map(team =>
-      searchRemoteShield(team)
-    )
-  );
+  const CONCURRENCY = 3;
+
+  for (let i = 0; i < missingTeams.length; i += CONCURRENCY) {
+    const batch = missingTeams.slice(i, i + CONCURRENCY);
+
+    await Promise.all(
+      batch.map(team => searchRemoteShield(team, 30000))
+    );
+
+    setStatus(`A procurar escudos: ${Math.min(i + batch.length, missingTeams.length)}/${missingTeams.length}`);
+  }
 
   const found = uniqueTeams.filter(
     team =>
@@ -1956,53 +2017,169 @@ function displayCompetition(
    TÍTULO DA COMPETIÇÃO
    ========================================================= */
 
-function drawCompetitionTitle(ctx, comp) {
+function drawCompetitionTitle(
+  ctx,
+  comp
+) {
   const centerX = 540;
-  const maxWidth = 820;
-  const title = String(comp?.title || '').trim();
-  const detail = String(comp?.detail || '').trim();
 
-  if (!title) return;
+  /*
+   * Pequeno título "COMPETIÇÃO".
+   */
+  ctx.textAlign =
+    'center';
 
-  let size = 104;
-  let lines = [];
-  while (size >= 48) {
-    ctx.font = `900 ${size}px Arial`;
-    lines = wrapLines(ctx, title, maxWidth, 2);
-    if (lines.length <= 2 && lines.every(line => ctx.measureText(line).width <= maxWidth)) break;
-    size -= 2;
+  ctx.fillStyle =
+    '#e7b63d';
+
+  ctx.font =
+    '700 23px Arial';
+
+  ctx.fillText(
+    'COMPETIÇÃO',
+    centerX,
+    225
+  );
+
+  /*
+   * Título principal.
+   */
+  const titleY = 315;
+
+  const match =
+    comp.title.match(
+      /^(.*?)(\d+)$/
+    );
+
+  if (match) {
+    const left =
+      match[1].trimEnd();
+
+    const num =
+      match[2];
+
+    const titleSize = 112;
+
+    ctx.font =
+      `900 ${titleSize}px Arial`;
+
+    const gap = 10;
+
+    const leftW =
+      ctx.measureText(left).width;
+
+    const numW =
+      ctx.measureText(num).width;
+
+    const totalW =
+      leftW +
+      gap +
+      numW;
+
+    let x =
+      centerX -
+      totalW / 2;
+
+    /*
+     * Parte textual.
+     */
+    ctx.textAlign =
+      'left';
+
+    ctx.fillStyle =
+      '#f5f7f8';
+
+    ctx.fillText(
+      left,
+      x,
+      titleY
+    );
+
+    /*
+     * Número.
+     */
+    x +=
+      leftW +
+      gap;
+
+    ctx.fillStyle =
+      '#e7b63d';
+
+    ctx.fillText(
+      num,
+      x,
+      titleY
+    );
+
+  } else {
+    const titleSize =
+      fit(
+        ctx,
+        comp.title,
+        860,
+        108,
+        54
+      );
+
+    ctx.textAlign =
+      'center';
+
+    ctx.font =
+      `900 ${titleSize}px Arial`;
+
+    ctx.fillStyle =
+      '#f5f7f8';
+
+    ctx.fillText(
+      comp.title,
+      centerX,
+      titleY
+    );
   }
 
-  ctx.textAlign = 'center';
-  ctx.fillStyle = '#f5f7f8';
-  ctx.font = `900 ${size}px Arial`;
-  const lineHeight = size + 8;
-  const firstY = lines.length === 1 ? 300 : 270;
-  lines.forEach((line, i) => ctx.fillText(line, centerX, firstY + i * lineHeight));
+  /*
+   * Linha dourada.
+   */
+  drawGoldLine(
+    ctx,
+    300,
+    365,
+    780
+  );
 
-  const titleBottom = firstY + (lines.length - 1) * lineHeight;
-  const lineY = titleBottom + 48;
-  drawGoldLine(ctx, 300, lineY, 780);
+  /*
+   * ======================================================
+   * SUBTÍTULO / SEGUNDA FRASE
+   * ======================================================
+   *
+   * É medido e centrado pelo tamanho real.
+   */
+  if (comp.detail) {
+    const detailSize =
+      fit(
+        ctx,
+        comp.detail,
+        850,
+        25,
+        15
+      );
 
-  if (detail) {
-    let detailSize = 25;
-    let detailLines = [];
-    while (detailSize >= 15) {
-      ctx.font = `700 ${detailSize}px Arial`;
-      detailLines = wrapLines(ctx, detail, maxWidth, 2);
-      if (detailLines.length <= 2 && detailLines.every(line => ctx.measureText(line).width <= maxWidth)) break;
-      detailSize -= 1;
-    }
-    ctx.font = `700 ${detailSize}px Arial`;
-    ctx.textAlign = 'center';
-    ctx.fillStyle = '#f5f7f8';
-    const detailY = lineY + 48;
-    const detailLineHeight = detailSize + 5;
-    detailLines.forEach((line, i) => ctx.fillText(line, centerX, detailY + i * detailLineHeight));
+    ctx.font =
+      `700 ${detailSize}px Arial`;
+
+    ctx.textAlign =
+      'center';
+
+    ctx.fillStyle =
+      '#f5f7f8';
+
+    ctx.fillText(
+      comp.detail,
+      centerX,
+      415
+    );
   }
-  ctx.textAlign = 'left';
 }
-
 
 
 /* =========================================================
