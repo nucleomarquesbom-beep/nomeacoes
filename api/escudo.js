@@ -1,627 +1,243 @@
-import sharp from 'sharp';
-
-const ZEROZERO = 'https://www.zerozero.pt';
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 NAF-Marques-Bom/6.0';
-const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
-const FETCH_TIMEOUT_MS = 12000;
-
-function normalize(value = '') {
-  return String(value)
+function normalize(s = '') {
+  return String(s)
     .toLowerCase()
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .replace(/[ºª°]/g, '')
-    .replace(/[^\p{L}\p{N}\s.'-]/gu, ' ')
+    .replace(/["'.,/()\-]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }
 
-function compact(value = '') {
-  return normalize(value).replace(/\s+/g, '');
+function cleanName(s = '') {
+  let value = String(s).trim();
+  value = value.replace(/(?:\s+|\/)OAF\s+SDUQ\s*$/i, '');
+  value = value.replace(/(?:\s+|\/)(?:SAD|SDUQ|OAF)\s*$/i, '');
+  return value.replace(/\s+/g, ' ').trim();
 }
 
-function cleanTeam(value = '') {
-  return String(value)
+function safeName(name = '') {
+  return cleanName(name)
+    .replace(/[<>:"/\\|?*\u0000-\u001F]/g, '')
     .replace(/\s+/g, ' ')
     .trim();
 }
 
-function slug(value = '') {
-  return normalize(value)
-    .replace(/[^\p{L}\p{N}]+/gu, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 100) || 'escudo';
+function score(query, candidate) {
+  const q = normalize(query);
+  const c = normalize(candidate);
+  if (!q || !c) return -9999;
+  if (q === c) return 1000;
+  if (c.includes(q) || q.includes(c)) return 700 - Math.abs(c.length - q.length);
+  const qa = new Set(q.split(' ').filter(Boolean));
+  const ca = new Set(c.split(' ').filter(Boolean));
+  const common = [...qa].filter(x => ca.has(x)).length;
+  return common * 50 - Math.abs(c.length - q.length);
 }
 
-/*
- * Regras mantidas da aplicação:
- * - nome original;
- * - remover / OAF;
- * - remover SAD/SDUQ;
- * - remover pontuação.
- */
-function teamVariants(team) {
-  const base = cleanTeam(team);
-
-  return [...new Set([
-    base,
-    base
-      .replace(/\s*\/\s*OAF\b/ig, '')
-      .replace(/\bSAD\b/ig, '')
-      .replace(/\bSDUQ\b/ig, '')
-      .replace(/\s+/g, ' ')
-      .trim(),
-    base.replace(/[,.]/g, '').replace(/\s+/g, ' ').trim()
-  ].filter(Boolean))];
+async function sportsDb(name) {
+  const url = 'https://www.thesportsdb.com/api/v1/json/123/searchteams.php?t=' + encodeURIComponent(name);
+  const r = await fetch(url, { headers: { Accept: 'application/json' } });
+  if (!r.ok) return null;
+  const data = await r.json();
+  const teams = Array.isArray(data?.teams) ? data.teams : [];
+  return teams.filter(t => t?.strBadge)
+    .map(t => ({ score: score(name, t.strTeam), url: t.strBadge, source: 'TheSportsDB', team: t.strTeam }))
+    .sort((a, b) => b.score - a.score)[0] || null;
 }
 
-function scoreName(wanted, candidate) {
-  const a = normalize(wanted);
-  const b = normalize(candidate);
+async function wikidata(name) {
+  const searchUrl = 'https://www.wikidata.org/w/api.php?action=wbsearchentities&search=' + encodeURIComponent(name) + '&language=pt&uselang=pt&format=json&limit=8';
+  const sr = await fetch(searchUrl, { headers: { Accept: 'application/json', 'User-Agent': 'NAF-Marques-Bom/1.0' } });
+  if (!sr.ok) return null;
+  const search = await sr.json();
+  const ids = (search.search || []).map(x => x.id).filter(Boolean);
+  if (!ids.length) return null;
 
-  if (!a || !b) return -Infinity;
-  if (a === b) return 10000;
+  const getUrl = 'https://www.wikidata.org/w/api.php?action=wbgetentities&ids=' + ids.join('|') + '&props=claims|labels&languages=pt|en&format=json';
+  const gr = await fetch(getUrl, { headers: { Accept: 'application/json', 'User-Agent': 'NAF-Marques-Bom/1.0' } });
+  if (!gr.ok) return null;
+  const entities = await gr.json();
 
-  const aw = a.split(' ').filter(Boolean);
-  const bw = new Set(b.split(' ').filter(Boolean));
-  const common = aw.filter(w => w.length > 1 && bw.has(w)).length;
-  const coverage = common / Math.max(aw.length, 1);
-
-  let score = common * 700 + coverage * 1200;
-  if (a.includes(b) || b.includes(a)) score += 900;
-  score -= Math.abs(a.length - b.length) * 1.5;
-
-  return score;
-}
-
-async function fetchWithTimeout(url, options = {}, timeoutMs = FETCH_TIMEOUT_MS) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-
-  try {
-    return await fetch(url, {
-      ...options,
-      redirect: 'follow',
-      signal: controller.signal,
-      headers: {
-        'User-Agent': UA,
-        'Accept-Language': 'pt-PT,pt;q=0.9,en;q=0.7',
-        ...(options.headers || {})
-      }
+  const ranked = [];
+  for (const id of ids) {
+    const entity = entities?.entities?.[id];
+    const claim = entity?.claims?.P154?.[0];
+    const fileName = claim?.mainsnak?.datavalue?.value;
+    if (!fileName) continue;
+    const label = entity?.labels?.pt?.value || entity?.labels?.en?.value || '';
+    ranked.push({
+      score: score(name, label),
+      url: 'https://commons.wikimedia.org/wiki/Special:FilePath/' + encodeURIComponent(String(fileName).replace(/^File:/i, '')),
+      source: 'Wikidata/Wikimedia Commons',
+      team: label
     });
-  } finally {
-    clearTimeout(timer);
   }
+  return ranked.sort((a, b) => b.score - a.score)[0] || null;
 }
 
-function absolute(base, value) {
-  try {
-    return new URL(
-      String(value)
-        .replace(/&amp;/g, '&')
-        .replace(/\\\//g, '/'),
-      base
-    ).href;
-  } catch {
-    return null;
-  }
+async function wikipedia(name) {
+  const url = 'https://pt.wikipedia.org/w/api.php?action=query&generator=search&gsrsearch=' + encodeURIComponent(name) + '&gsrnamespace=0&prop=pageimages&piprop=thumbnail&pithumbsize=800&format=json';
+  const r = await fetch(url, { headers: { Accept: 'application/json', 'User-Agent': 'NAF-Marques-Bom/1.0' } });
+  if (!r.ok) return null;
+  const data = await r.json();
+  const pages = Object.values(data?.query?.pages || {});
+  return pages.filter(p => p?.thumbnail?.source)
+    .map(p => ({ score: score(name, p.title), url: p.thumbnail.source, source: 'Wikipedia', team: p.title }))
+    .sort((a, b) => b.score - a.score)[0] || null;
 }
 
-function htmlText(value = '') {
-  return String(value)
-    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&nbsp;/gi, ' ')
-    .replace(/&amp;/gi, '&')
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;/gi, "'")
-    .replace(/\s+/g, ' ')
-    .trim();
+async function imageToDataUrl(url) {
+  const r = await fetch(url, { headers: { 'User-Agent': 'NAF-Marques-Bom/1.0' } });
+  if (!r.ok) return null;
+  const type = (r.headers.get('content-type') || 'image/png').split(';')[0];
+  const buffer = Buffer.from(await r.arrayBuffer());
+  return `data:${type};base64,${buffer.toString('base64')}`;
 }
 
-function extractTeamLinks(html, baseUrl, wanted) {
-  const result = [];
-  const seen = new Set();
+async function findShield(raw) {
+  const names = [...new Set([String(raw).trim(), cleanName(raw)].filter(Boolean))];
+  const results = [];
 
-  const add = (href, label = '') => {
-    const url = absolute(baseUrl, href);
-    if (!url) return;
-
-    let u;
-    try { u = new URL(url); } catch { return; }
-
-    if (u.hostname !== 'www.zerozero.pt') return;
-    if (!/^\/equipa\//i.test(u.pathname)) return;
-
-    const cleanUrl = `${u.origin}${u.pathname}${u.search}`;
-    if (seen.has(cleanUrl)) return;
-    seen.add(cleanUrl);
-
-    const name = htmlText(label) ||
-      decodeURIComponent(u.pathname.split('/')[2] || '').replace(/-/g, ' ');
-
-    if (!name) return;
-
-    result.push({
-      name,
-      url: cleanUrl,
-      score: scoreName(wanted, name)
-    });
-  };
-
-  const anchorRe = /<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
-  let m;
-
-  while ((m = anchorRe.exec(html))) {
-    add(m[1], m[2]);
-  }
-
-  // Também apanha URLs /equipa/ presentes em JSON/atributos.
-  const urlRe = /["']((?:https?:\/\/www\.zerozero\.pt)?\/equipa\/[^"'\\\s]+)["']/gi;
-
-  while ((m = urlRe.exec(html))) {
-    add(m[1]);
-  }
-
-  return result.sort((a, b) => b.score - a.score);
-}
-
-function extractLogoCandidates(html, pageUrl) {
-  const result = [];
-  const seen = new Set();
-
-  const add = raw => {
-    const url = absolute(pageUrl, raw);
-    if (!url || seen.has(url)) return;
-
-    try {
-      const u = new URL(url);
-
-      // Para esta função, o ZeroZero é a fonte autorizada.
-      if (
-        u.hostname !== 'www.zerozero.pt' &&
-        !u.hostname.endsWith('.zerozero.pt')
-      ) return;
-    } catch {
-      return;
-    }
-
-    seen.add(url);
-    result.push(url);
-  };
-
-  for (const m of html.matchAll(
-    /https?:\/\/[^"'<> \t\r\n]+\/img\/logos\/equipas\/[^"'<> \t\r\n]+/gi
-  )) add(m[0]);
-
-  for (const m of html.matchAll(
-    /(?:src|data-src|data-original|data-lazy-src|data-image)=["']([^"']+)["']/gi
-  )) {
-    if (
-      /\/img\/logos\/equipas\//i.test(m[1]) ||
-      /(logo|badge|emblem|escudo|crest)/i.test(m[1])
-    ) add(m[1]);
-  }
-
-  for (const m of html.matchAll(
-    /<meta\b[^>]*(?:property|name)=["'](?:og:image|twitter:image)["'][^>]*content=["']([^"']+)["'][^>]*>/gi
-  )) add(m[1]);
-
-  for (const m of html.matchAll(
-    /"(?:logo|image)"\s*:\s*"([^"]+)"/gi
-  )) add(m[1]);
-
-  return result;
-}
-
-async function openTeamPage(candidate, wanted) {
-  let response;
-
-  try {
-    response = await fetchWithTimeout(candidate.url, {
-      headers: { Accept: 'text/html,application/xhtml+xml' }
-    });
-  } catch {
-    return null;
-  }
-
-  if (!response?.ok) return null;
-
-  const html = await response.text();
-
-  const title = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || '';
-  const h1 = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i)?.[1] || '';
-  const pageName = htmlText(h1 || title);
-
-  const score = Math.max(
-    scoreName(wanted, pageName),
-    scoreName(wanted, candidate.name)
-  );
-
-  // Não aceitar uma página genérica/errada.
-  if (score < 650) return null;
-
-  const logoUrls = extractLogoCandidates(html, candidate.url);
-  if (!logoUrls.length) return null;
-
-  return {
-    name: pageName || candidate.name,
-    page: candidate.url,
-    logoUrl: logoUrls[0],
-    score
-  };
-}
-
-async function searchZeroZero(team) {
-  const wanted = cleanTeam(team);
-  const candidates = [];
-
-  const paths = [
-    q => `/pesquisa?search_txt=${encodeURIComponent(q)}`,
-    q => `/pesquisa?query=${encodeURIComponent(q)}`,
-    q => `/pesquisa?search=${encodeURIComponent(q)}`,
-    q => `/search.php?search_string=${encodeURIComponent(q)}`
-  ];
-
-  for (const variant of teamVariants(wanted)) {
-    for (const makePath of paths) {
-      try {
-        const response = await fetchWithTimeout(
-          ZEROZERO + makePath(variant),
-          { headers: { Accept: 'text/html,application/xhtml+xml' } }
-        );
-
-        if (!response.ok) continue;
-
-        const html = await response.text();
-        candidates.push(...extractTeamLinks(html, ZEROZERO, wanted));
-
-        // Já temos uma correspondência exacta: não precisamos de bombardear
-        // o ZeroZero com mais pesquisas.
-        if (candidates.some(c => c.score >= 10000)) break;
-      } catch {
-        // tenta a próxima variante
-      }
-    }
-
-    if (candidates.some(c => c.score >= 10000)) break;
-  }
-
-  const unique = [];
-  const seen = new Set();
-
-  for (const candidate of candidates.sort((a, b) => b.score - a.score)) {
-    if (seen.has(candidate.url)) continue;
-    seen.add(candidate.url);
-    unique.push(candidate);
-  }
-
-  for (const candidate of unique.slice(0, 6)) {
-    const page = await openTeamPage(candidate, wanted);
-    if (page) {
-      return {
-        requested: wanted,
-        matchedTeam: page.name,
-        zeroZeroPage: page.page,
-        zeroZeroImage: page.logoUrl,
-        score: page.score
-      };
+  for (const name of names) {
+    const found = await Promise.allSettled([sportsDb(name), wikidata(name), wikipedia(name)]);
+    for (const r of found) {
+      if (r.status === 'fulfilled' && r.value?.url) results.push(r.value);
     }
   }
 
-  throw new Error(`Não foi possível identificar "${wanted}" no ZeroZero.`);
-}
+  results.sort((a, b) => b.score - a.score);
+  const best = results[0];
+  if (!best) return null;
 
-async function downloadImage(url) {
-  let response;
-
-  try {
-    response = await fetchWithTimeout(url, {
-      headers: {
-        Accept:
-          'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8'
-      }
-    });
-  } catch {
-    return null;
-  }
-
-  if (!response?.ok) return null;
-
-  const type = (response.headers.get('content-type') || '').toLowerCase();
-  const length = Number(response.headers.get('content-length') || 0);
-
-  if (!type.startsWith('image/')) return null;
-  if (length > MAX_IMAGE_BYTES) return null;
-
-  const buffer = Buffer.from(await response.arrayBuffer());
-
-  if (buffer.length > MAX_IMAGE_BYTES) return null;
-
-  return buffer;
-}
-
-async function toPngDataUrl(buffer) {
-  const png = await sharp(buffer, { failOn: 'none' })
-    .rotate()
-    .ensureAlpha()
-    .png()
-    .toBuffer();
-
-  return `data:image/png;base64,${png.toString('base64')}`;
-}
-
-function githubConfig() {
-  return {
-    token: process.env.GITHUB_TOKEN,
-    repo: process.env.GITHUB_REPO,
-    branch: process.env.GITHUB_BRANCH || 'main'
-  };
-}
-
-async function github(url, options = {}) {
-  const { token } = githubConfig();
-  if (!token) return null;
-
-  try {
-    return await fetchWithTimeout(
-      url,
-      {
-        ...options,
-        headers: {
-          Accept: 'application/vnd.github+json',
-          Authorization: `Bearer ${token}`,
-          'X-GitHub-Api-Version': '2022-11-28',
-          ...(options.headers || {})
-        }
-      },
-      7000
-    );
-  } catch {
-    return null;
-  }
-}
-
-async function cachedShield(team) {
-  const { repo, branch } = githubConfig();
-  if (!repo || !process.env.GITHUB_TOKEN) return null;
-
-  const paths = [];
-
-  for (const variant of teamVariants(team)) {
-    const base = slug(variant);
-    for (const ext of ['png', 'jpg', 'jpeg', 'webp']) {
-      paths.push(`public/escudos/${base}.${ext}`);
-    }
-  }
-
-  for (const path of [...new Set(paths)]) {
-    const apiUrl =
-      `https://api.github.com/repos/${repo}/contents/` +
-      path.split('/').map(encodeURIComponent).join('/') +
-      `?ref=${encodeURIComponent(branch)}`;
-
-    const response = await github(apiUrl);
-    if (!response?.ok) continue;
-
-    const meta = await response.json().catch(() => null);
-    if (!meta?.download_url) continue;
-
-    const image = await downloadImage(meta.download_url);
-    if (!image) continue;
-
-    return {
-      imageDataUrl: await toPngDataUrl(image),
-      source: 'GitHub',
-      cached: true,
-      path
-    };
-  }
-
-  return null;
-}
-
-async function saveToGithub(team, dataUrl) {
-  const { repo, branch } = githubConfig();
-
-  // O GitHub é cache. Se estiver indisponível, NÃO pode impedir a geração.
-  if (!repo || !process.env.GITHUB_TOKEN) {
-    return {
-      saved: false,
-      cacheError: 'GITHUB_TOKEN/GITHUB_REPO não configurado.'
-    };
-  }
-
-  const match = String(dataUrl).match(
-    /^data:image\/png;base64,(.+)$/i
-  );
-
-  if (!match) {
-    return {
-      saved: false,
-      cacheError: 'Imagem PNG inválida.'
-    };
-  }
-
-  const path = `public/escudos/${slug(team)}.png`;
-
-  const apiUrl =
-    `https://api.github.com/repos/${repo}/contents/` +
-    path.split('/').map(encodeURIComponent).join('/');
-
-  // Nunca substituir um escudo já existente.
-  const existing = await github(
-    `${apiUrl}?ref=${encodeURIComponent(branch)}`
-  );
-
-  if (existing?.ok) {
-    return {
-      saved: true,
-      alreadyExists: true,
-      path
-    };
-  }
-
-  if (existing && existing.status !== 404) {
-    return {
-      saved: false,
-      cacheError: `GitHub respondeu ${existing.status}.`,
-      path
-    };
-  }
-
-  const write = await github(apiUrl, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      message: `Adicionar escudo: ${cleanTeam(team)}`,
-      content: match[1],
-      branch
-    })
-  });
-
-  if (!write) {
-    return {
-      saved: false,
-      cacheError: 'GitHub indisponível no momento.',
-      path
-    };
-  }
-
-  const result = await write.json().catch(() => ({}));
-
-  if (!write.ok) {
-    return {
-      saved: false,
-      cacheError: result?.message || `GitHub respondeu ${write.status}.`,
-      path
-    };
-  }
-
-  return {
-    saved: true,
-    alreadyExists: false,
-    path
-  };
-}
-
-async function one(team) {
-  const requested = cleanTeam(team);
-
-  if (!requested) {
-    return {
-      ok: false,
-      error: 'Nome da equipa vazio.'
-    };
-  }
-
-  // 1. Cache permanente primeiro.
-  const cached = await cachedShield(requested);
-
-  if (cached) {
-    return {
-      ok: true,
-      team: requested,
-      ...cached
-    };
-  }
-
-  // 2. ZeroZero.
-  const found = await searchZeroZero(requested);
-  const image = await downloadImage(found.zeroZeroImage);
-
-  if (!image) {
-    return {
-      ok: false,
-      team: requested,
-      source: 'ZeroZero',
-      error: 'Encontrámos a equipa, mas não foi possível descarregar o escudo.'
-    };
-  }
-
-  const imageDataUrl = await toPngDataUrl(image);
-
-  // 3. Guardar em cache sem tornar o GitHub obrigatório.
-  const saved = await saveToGithub(requested, imageDataUrl);
-
-  return {
-    ok: true,
-    team: requested,
-    ...found,
-    source: 'ZeroZero',
-    imageDataUrl,
-    ...saved
-  };
+  const imageDataUrl = await imageToDataUrl(best.url);
+  if (!imageDataUrl) return null;
+  return { ...best, imageDataUrl };
 }
 
 function parseBody(req) {
   if (req.body && typeof req.body === 'object') return req.body;
+  try { return JSON.parse(req.body || '{}'); } catch { return {}; }
+}
+
+function parseImageDataUrl(dataUrl) {
+  const match = String(dataUrl || '').match(/^data:image\/(png|jpeg|jpg|webp);base64,(.+)$/i);
+  if (!match) return null;
+  const ext = match[1].toLowerCase() === 'jpeg' ? 'jpg' : match[1].toLowerCase();
+  return { extension: ext, base64: match[2] };
+}
+
+async function saveShieldToGitHub(team, dataUrl) {
+  const token = process.env.GITHUB_TOKEN;
+  const repo = process.env.GITHUB_REPO;
+  const branch = process.env.GITHUB_BRANCH || 'main';
+
+  if (!token || !repo) {
+    return { ok: false, error: 'GITHUB_TOKEN ou GITHUB_REPO não configurado no Vercel.' };
+  }
+
+  const image = parseImageDataUrl(dataUrl);
+  if (!image) return { ok: false, error: 'Imagem inválida.' };
+
+  const filename = safeName(team) + '.' + image.extension;
+  const path = `public/escudos/${filename}`;
+  const apiBase = `https://api.github.com/repos/${repo}/contents/${encodeURIComponent(path).replace(/%2F/g, '/')}`;
+  const headers = {
+    Accept: 'application/vnd.github+json',
+    Authorization: `Bearer ${token}`,
+    'X-GitHub-Api-Version': '2022-11-28',
+    'Content-Type': 'application/json'
+  };
 
   try {
-    return JSON.parse(req.body || '{}');
-  } catch {
-    return {};
+    let sha;
+    const current = await fetch(`${apiBase}?ref=${encodeURIComponent(branch)}`, { headers });
+
+    if (current.ok) {
+      const currentData = await current.json();
+      sha = currentData?.sha;
+    } else if (current.status !== 404) {
+      const detail = await current.text().catch(() => '');
+      return { ok: false, error: `GitHub GET falhou: ${detail.slice(0, 500)}` };
+    }
+
+    const payload = {
+      message: `Adicionar escudo: ${filename}`,
+      content: image.base64,
+      branch,
+      ...(sha ? { sha } : {})
+    };
+
+    const put = await fetch(apiBase, {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify(payload)
+    });
+
+    const result = await put.json().catch(() => ({}));
+
+    if (!put.ok) {
+      return {
+        ok: false,
+        error: result?.message || `GitHub PUT falhou (${put.status})`
+      };
+    }
+
+    return {
+      ok: true,
+      path,
+      commit: result?.commit?.sha || null
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error?.message || 'Erro ao guardar escudo no GitHub.'
+    };
   }
 }
 
+async function saveShield(req, res) {
+  const { team, dataUrl } = parseBody(req);
+  if (!team || !dataUrl) {
+    return res.status(400).json({ error: 'team e dataUrl são obrigatórios.' });
+  }
+
+  const result = await saveShieldToGitHub(team, dataUrl);
+  if (!result.ok) return res.status(500).json({ error: result.error });
+
+  return res.status(200).json({
+    ok: true,
+    path: result.path,
+    url: `/${result.path}`,
+    commit: result.commit
+  });
+}
+
 export default async function handler(req, res) {
+  if (req.method === 'POST') return saveShield(req, res);
+  if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
+
+  const raw = String(req.query?.team || '').trim();
+  if (!raw) return res.status(400).json({ error: 'team obrigatório' });
+
   try {
-    if (req.method === 'GET') {
-      const result = await one(req.query?.team || '');
-      return res.status(result.ok ? 200 : 404).json(result);
-    }
+    const result = await findShield(raw);
+    if (!result) return res.status(404).json({ error: 'Escudo não encontrado' });
 
-    if (req.method === 'POST') {
-      const data = parseBody(req);
+    /*
+     * O próprio servidor guarda o escudo depois de o encontrar.
+     * Isto é mais robusto do que devolver uma data URL enorme ao
+     * browser e pedir-lhe para a reenviar num segundo POST.
+     */
+    const saved = await saveShieldToGitHub(raw, result.imageDataUrl);
 
-      if (!Array.isArray(data.teams)) {
-        return res.status(400).json({
-          ok: false,
-          error: 'teams obrigatório.'
-        });
-      }
-
-      const teams = [...new Set(
-        data.teams.map(cleanTeam).filter(Boolean)
-      )];
-
-      const results = [];
-
-      // Protege o ZeroZero: no máximo 3 pesquisas simultâneas.
-      for (let i = 0; i < teams.length; i += 3) {
-        const batch = teams.slice(i, i + 3);
-
-        const part = await Promise.all(
-          batch.map(team =>
-            one(team).catch(error => ({
-              ok: false,
-              team,
-              error: error?.message || 'Erro desconhecido.'
-            }))
-          )
-        );
-
-        results.push(...part);
-      }
-
-      return res.status(200).json({
-        ok: true,
-        total: teams.length,
-        results
-      });
-    }
-
-    return res.status(405).json({
-      ok: false,
-      error: 'Method not allowed'
+    return res.status(200).json({
+      ...result,
+      saved: !!saved.ok,
+      savedPath: saved.path || null,
+      saveError: saved.ok ? null : saved.error
     });
   } catch (error) {
-    console.error('[api/escudo]', error);
-
-    return res.status(500).json({
-      ok: false,
-      error: error?.message || 'Erro interno na pesquisa do escudo.'
-    });
+    return res.status(500).json({ error: error?.message || 'Erro na pesquisa do escudo' });
   }
 }
