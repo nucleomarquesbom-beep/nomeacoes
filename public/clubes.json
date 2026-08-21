@@ -1,1 +1,8 @@
-{"versao":1,"geradoEm":null,"fontePrincipal":"ZeroZero","total":0,"clubes":[]}
+{
+  "versao": 2,
+  "geradoEm": null,
+  "fonteIdentificacao": "FPF",
+  "fonteEscudo": "ZeroZero",
+  "total": 0,
+  "clubes": []
+}
