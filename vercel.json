@@ -1,8 +1,13 @@
 {
+  "$schema": "https://openapi.vercel.sh/vercel.json",
   "rewrites": [
     {
       "source": "/escudos/:name",
       "destination": "/api/escudo-image?team=:name"
     }
-  ]
+  ],
+  "functions": {
+    "api/escudo.js": { "maxDuration": 60 },
+    "api/escudo-image.js": { "maxDuration": 60 }
+  }
 }
