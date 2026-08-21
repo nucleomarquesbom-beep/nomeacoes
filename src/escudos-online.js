@@ -3,16 +3,8 @@
  * ESCUDOS ONLINE
  * ============================================================
  *
- * O app deve:
- *   1. procurar primeiro os escudos locais;
- *   2. enviar apenas os que faltam para esta função;
- *   3. guardar os resultados em state.assets.
- *
- * A API /api/escudo é responsável por:
- *   - procurar no ZeroZero;
- *   - descarregar o escudo;
- *   - gravá-lo em public/escudos/ no GitHub;
- *   - devolver a imagem para a publicação actual.
+ * Compatível com /api/escudo:
+ *   POST { teams: [...] }
  */
 
 export async function prepareMissingShields(
@@ -71,10 +63,14 @@ export async function prepareMissingShields(
         const img = await loadImage(result.imageDataUrl);
 
         if (img) {
-          state.assets.set(
-            "remoteShield:" + compact(result.team),
-            img
-          );
+          // O app actual guarda os escudos directamente em state.assets.
+          if (typeof state !== "undefined" &&
+              typeof compact === "function") {
+            state.assets.set(
+              "remoteShield:" + compact(result.team),
+              img
+            );
+          }
         } else {
           failures.push({
             team: result.team,
