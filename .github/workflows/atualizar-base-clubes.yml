@@ -1,26 +1,39 @@
-name: Atualizar base de clubes
+name: Atualizar base FPF -> ZeroZero
+
 on:
   workflow_dispatch:
   schedule:
     - cron: '30 3 * * 0'
+
 permissions:
   contents: write
+
+concurrency:
+  group: atualizar-base-clubes
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Node.js
+        uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Construir base
+
+      - name: Construir base FPF -> ZeroZero
         run: node scripts/build-club-database.mjs
-      - name: Commit alterações
+
+      - name: Guardar base validada
         run: |
           git config user.name 'NAF Marques Bom'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add public/clubes.json public/escudos
+          git add public/clubes.json
           if git diff --cached --quiet; then exit 0; fi
-          git commit -m 'Atualizar base de clubes e escudos'
+          git commit -m 'Atualizar base de clubes FPF -> ZeroZero'
           git push
