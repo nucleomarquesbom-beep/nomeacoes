@@ -1,0 +1,8 @@
+{
+  "rewrites": [
+    {
+      "source": "/escudos/:name",
+      "destination": "/api/escudo-image?team=:name"
+    }
+  ]
+}
