@@ -2,16 +2,16 @@ import { Buffer } from 'node:buffer';
 
 const FPF_BASE = 'https://resultados.fpf.pt';
 const ZEROZERO_BASE = 'https://www.zerozero.pt';
+const JINA_SEARCH = 'https://s.jina.ai/';
+const JINA_READER = 'https://r.jina.ai/';
 const GITHUB_API = 'https://api.github.com';
+const UA = process.env.FPF_ZEROZERO_USER_AGENT || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/151 Safari/537.36';
 
-const DEFAULT_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/151 Safari/537.36';
-
-const ASSOCIATION_IDS = Array.from({ length: 22 }, (_, i) => 219 + i);
+const memory = new Map();
+const inFlight = new Map();
 
 function clean(value = '') {
-  return String(value)
-    .replace(/\s+/g, ' ')
-    .trim();
+  return String(value).replace(/\s+/g, ' ').trim();
 }
 
 export function normalize(value = '') {
@@ -20,30 +20,18 @@ export function normalize(value = '') {
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .replace(/[ºª°]/g, '')
-    .replace(/["'.,/()\-]/g, ' ')
+    .replace(/["'.,/()-]/g, ' ')
     .replace(/\b(?:sad|sduq|oaf)\b/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
-}
-
-function scoreName(a, b) {
-  const x = normalize(a);
-  const y = normalize(b);
-  if (!x || !y) return -Infinity;
-  if (x === y) return 10000;
-  const xs = new Set(x.split(' '));
-  const ys = new Set(y.split(' '));
-  const common = [...xs].filter(v => ys.has(v)).length;
-  const containment = x.includes(y) || y.includes(x) ? 2500 : 0;
-  return containment + common * 500 - Math.abs(x.length - y.length);
 }
 
 function absolute(url, base) {
   try { return new URL(url, base).href; } catch { return null; }
 }
 
-function htmlText(html = '') {
-  return String(html)
+function htmlText(value = '') {
+  return String(value)
     .replace(/<script[\s\S]*?<\/script>/gi, ' ')
     .replace(/<style[\s\S]*?<\/style>/gi, ' ')
     .replace(/<[^>]+>/g, ' ')
@@ -55,214 +43,246 @@ function htmlText(html = '') {
     .trim();
 }
 
-function extractLinks(html, base, matcher) {
-  const result = [];
-  const re = /<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
-  let match;
-  while ((match = re.exec(html))) {
-    const href = absolute(match[1], base);
-    if (!href || (matcher && !matcher(href))) continue;
-    const text = htmlText(match[2]);
-    result.push({ href, text });
+function linksFromText(text, allowedHost, pathPattern) {
+  const out = [];
+  const re = /https?:\/\/[^\s<>"')]+/gi;
+  let m;
+
+  while ((m = re.exec(String(text)))) {
+    const url = m[0].replace(/[),.;]+$/, '');
+    try {
+      const u = new URL(url);
+      if (u.hostname !== allowedHost && !u.hostname.endsWith(`.${allowedHost}`)) continue;
+      if (pathPattern && !pathPattern.test(u.pathname)) continue;
+      out.push(url);
+    } catch {}
   }
-  const unique = new Map();
-  for (const item of result) unique.set(item.href, item);
-  return [...unique.values()];
+
+  return [...new Set(out)];
 }
 
-async function fetchText(url, { accept = 'text/html,application/xhtml+xml', timeoutMs = 15000 } = {}) {
+async function fetchText(url, { timeoutMs = 12000, jina = false } = {}) {
+  const target = jina ? `${JINA_READER}${url}` : url;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+
   try {
-    const response = await fetch(url, {
+    const r = await fetch(target, {
       redirect: 'follow',
       signal: controller.signal,
       headers: {
-        'User-Agent': process.env.FPF_ZEROZERO_USER_AGENT || DEFAULT_UA,
-        'Accept-Language': 'pt-PT,pt;q=0.9,en;q=0.7',
-        Accept: accept
+        'User-Agent': UA,
+        'Accept-Language': 'pt-PT,pt;q=0.9,en;q=0.8',
+        Accept: jina
+          ? 'text/plain,text/markdown,text/html,*/*'
+          : 'text/html,application/xhtml+xml,*/*;q=0.8'
       }
     });
-    if (!response.ok) throw new Error(`HTTP_${response.status}`);
-    return await response.text();
+
+    if (!r.ok) throw new Error(`HTTP_${r.status}`);
+    return await r.text();
   } finally {
     clearTimeout(timer);
   }
 }
 
-function extractFpfNumber(html) {
-  const text = htmlText(html);
-  const patterns = [
-    /\bN(?:[ºo°]|úmero)?\s*F\.?\s*P\.?\s*F\.?\s*[:\-]?\s*(\d{1,6})\b/i,
-    /\bN(?:[ºo°]|úmero)?\s*[:\-]?\s*(\d{1,6})\s+F\.?\s*P\.?\s*F\.?\b/i,
-    /\bF\.?\s*P\.?\s*F\.?\s*(?:N(?:[ºo°]|úmero)?|Num\.?)?\s*[:\-]?\s*(\d{1,6})\b/i,
-    /(?:fpfNumber|numeroFpf|numFpf|fpfNo)\s*["']?\s*[:=]\s*["']?(\d{1,6})/i
-  ];
-  for (const pattern of patterns) {
-    const match = text.match(pattern) || html.match(pattern);
-    if (match) return match[1];
-  }
-  return null;
+async function jinaSearch(query) {
+  return fetchText(`${JINA_SEARCH}${encodeURIComponent(query)}`, { timeoutMs: 12000 });
 }
 
-function extractTitle(html) {
-  const h1 = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
-  if (h1) return htmlText(h1[1]);
-  const og = html.match(/<meta[^>]+(?:property|name)=["']og:title["'][^>]+content=["']([^"']+)["']/i);
-  if (og) return og[1].trim();
-  const title = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+function extractTitle(text) {
+  const md = String(text).match(/^#\s+(.+)$/m);
+  if (md) return clean(md[1]);
+
+  const title = String(text).match(/<title[^>]*>([\s\S]*?)<\/title>/i);
   return title ? htmlText(title[1]) : '';
 }
 
-function extractFpfClubLinks(html, base) {
-  return extractLinks(
-    html,
-    base,
-    href => /\/Club\/Details\?clubId=\d+/i.test(href)
-  );
-}
+function extractFpfNumber(text) {
+  const source = `${text}\n${htmlText(text)}`;
 
-let fpfDirectoryPromise = null;
+  const patterns = [
+    /\bN(?:[ºo°]|úmero)?\s*F\.?\s*P\.?\s*F\.?\s*[:\-]?\s*(\d{1,6})\b/i,
+    /\bNum\.?\s*F\.?\s*P\.?\s*F\.?\s*[:\-]?\s*(\d{1,6})\b/i,
+    /\bF\.?\s*P\.?\s*F\.?\s*(?:N(?:[ºo°]|úmero)?|Num\.?)?\s*[:\-]?\s*(\d{1,6})\b/i,
+    /(?:fpfNumber|numeroFpf|numFpf|fpfNo)\s*["']?\s*[:=]\s*["']?(\d{1,6})/i
+  ];
 
-async function buildFpfDirectory() {
-  const candidates = [];
-  const results = await Promise.all(ASSOCIATION_IDS.map(async associationId => {
-    try {
-      const url = `${FPF_BASE}/Club/Club?associationId=${associationId}`;
-      const html = await fetchText(url, { timeoutMs: 9000 });
-      return extractLinks(html, FPF_BASE, href => /\/Club\/Details\?clubId=\d+/i.test(href));
-    } catch {
-      return [];
-    }
-  }));
-  for (const links of results) candidates.push(...links);
-  const unique = new Map();
-  for (const item of candidates) unique.set(item.href, item);
-  return [...unique.values()];
-}
-
-async function getFpfDirectory() {
-  if (!fpfDirectoryPromise) {
-    fpfDirectoryPromise = buildFpfDirectory().catch(error => {
-      fpfDirectoryPromise = null;
-      throw error;
-    });
+  for (const pattern of patterns) {
+    const match = source.match(pattern);
+    if (match) return match[1];
   }
-  return fpfDirectoryPromise;
+
+  return null;
 }
 
 async function searchFpf(team) {
   const wanted = clean(team);
+
+  const queries = [
+    `site:resultados.fpf.pt/Club/Details "${wanted}"`,
+    `site:resultados.fpf.pt/Club/Details ${wanted}`,
+    `site:resultados.fpf.pt "${wanted}" "Num. FPF"`
+  ];
+
   const candidates = [];
 
-  const directory = await getFpfDirectory();
-  for (const link of directory) {
-    const score = scoreName(wanted, link.text);
-    if (score > 0) candidates.push({ ...link, score });
-  }
-
-  // The public FPF directory is organised by association. The query UI is
-  // client-rendered, so crawling the official directory pages is more stable
-  // than guessing its internal AJAX endpoint.
-  for (const associationId of ASSOCIATION_IDS) {
+  for (const query of queries) {
     try {
-      const url = `${FPF_BASE}/Club/Club?associationId=${associationId}`;
-      const html = await fetchText(url, { timeoutMs: 9000 });
-      for (const link of extractFpfClubLinks(html, FPF_BASE)) {
-        const score = scoreName(wanted, link.text);
-        if (score > 0) candidates.push({ ...link, score });
-      }
-    } catch {
-      // An association can be temporarily unavailable. Continue with the others.
-    }
+      const result = await jinaSearch(query);
+      candidates.push(
+        ...linksFromText(
+          result,
+          'resultados.fpf.pt',
+          /\/Club\/Details$/i
+        )
+      );
+
+      if (candidates.length) break;
+    } catch {}
   }
 
-  const unique = new Map();
-  for (const item of candidates) {
-    const key = `${item.href}|${normalize(item.text)}`;
-    const previous = unique.get(key);
-    if (!previous || previous.score < item.score) unique.set(key, item);
+  const unique = [...new Set(candidates)];
+
+  if (!unique.length) {
+    throw new Error('FPF_CLUB_NOT_FOUND');
   }
 
-  const ranked = [...unique.values()]
-    .sort((a, b) => b.score - a.score)
-    .slice(0, 12);
-
-  for (const candidate of ranked) {
+  for (const url of unique.slice(0, 8)) {
     try {
-      const html = await fetchText(candidate.href, { timeoutMs: 9000 });
-      const number = extractFpfNumber(html);
+      const page = await fetchText(url, {
+        timeoutMs: 12000,
+        jina: true
+      });
+
+      const number = extractFpfNumber(page);
+
       if (!number) continue;
-      const name = extractTitle(html) || candidate.text;
-      if (scoreName(wanted, name) < 1000) continue;
+
       return {
-        name,
+        name: extractTitle(page) || wanted,
         fpfNumber: String(number),
-        url: candidate.href
+        url
       };
-    } catch {
-      // Try the next candidate.
-    }
+    } catch {}
   }
 
   throw new Error('FPF_NUMBER_NOT_FOUND');
 }
 
-function extractZeroZeroLogo(html, base) {
-  const urls = [];
-  const patterns = [
-    /(?:src|data-src|data-lazy-src|content)=["']([^"']*\/img\/logos\/equipas\/[^"']+)["']/gi,
-    /(https?:\/\/[^"'<>\s]+\/img\/logos\/equipas\/[^"'<>\s]+)/gi
-  ];
-  for (const pattern of patterns) {
-    let match;
-    while ((match = pattern.exec(html))) urls.push(match[1]);
-  }
-  return [...new Set(urls.map(url => absolute(url, base)).filter(Boolean))][0] || null;
-}
+function extractZeroZeroFpfNumber(text) {
+  const source = `${text}\n${htmlText(text)}`;
 
-function extractZeroZeroFpfNumber(html) {
-  const text = htmlText(html);
   const patterns = [
     /\bNum\.?\s*F\.?\s*P\.?\s*F\.?\s*[:\-]?\s*(\d{1,6})\b/i,
     /\bN(?:[úu]mero)?\s*F\.?\s*P\.?\s*F\.?\s*[:\-]?\s*(\d{1,6})\b/i,
     /(?:numFpf|fpfNumber)\s*["']?\s*[:=]\s*["']?(\d{1,6})/i
   ];
+
   for (const pattern of patterns) {
-    const match = text.match(pattern) || html.match(pattern);
+    const match = source.match(pattern);
     if (match) return match[1];
   }
+
   return null;
 }
 
-async function searchZeroZero(fpfNumber, fpfName) {
-  const searchUrl = `${ZEROZERO_BASE}/pesquisa?search_txt=${encodeURIComponent(String(fpfNumber))}`;
-  const html = await fetchText(searchUrl, { timeoutMs: 15000 });
-  const candidates = extractLinks(
-    html,
-    ZEROZERO_BASE,
-    href => /\/equipa\//i.test(new URL(href).pathname)
-  )
-    .map(item => ({ ...item, score: scoreName(fpfName, item.text) }))
-    .sort((a, b) => b.score - a.score)
-    .slice(0, 30);
+function extractLogoUrl(text, pageUrl) {
+  const source = String(text);
+  const urls = [];
 
-  for (const candidate of candidates) {
+  const direct = /https?:\/\/[^\s"'<>]+/gi;
+  let match;
+
+  while ((match = direct.exec(source))) {
+    const url = match[0].replace(/[),.;]+$/, '');
+
+    if (
+      /\.(?:png|jpe?g|webp|svg)(?:\?|$)/i.test(url) &&
+      /logo|escudo|badge|team|equipa/i.test(url)
+    ) {
+      urls.push(url);
+    }
+  }
+
+  const attrs =
+    source.match(/(?:src|data-src|data-lazy-src)=["'][^"']+["']/gi) || [];
+
+  for (const attr of attrs) {
+    const value = attr.match(/=["']([^"']+)["']/);
+
+    if (!value) continue;
+
+    const url = absolute(value[1], pageUrl);
+
+    if (
+      url &&
+      /\.(?:png|jpe?g|webp|svg)(?:\?|$)/i.test(url)
+    ) {
+      urls.push(url);
+    }
+  }
+
+  return [...new Set(urls)][0] || null;
+}
+
+async function searchZeroZero(fpfNumber, fpfName) {
+  const queries = [
+    `site:zerozero.pt/equipa "${fpfNumber}" "Num.FPF"`,
+    `site:zerozero.pt/equipa "${fpfNumber}" "${fpfName}"`,
+    `site:zerozero.pt/equipa "${fpfName}"`
+  ];
+
+  const candidates = [];
+
+  for (const query of queries) {
     try {
-      const page = await fetchText(candidate.href, { timeoutMs: 12000 });
+      const result = await jinaSearch(query);
+
+      candidates.push(
+        ...linksFromText(
+          result,
+          'www.zerozero.pt',
+          /\/equipa\//i
+        )
+      );
+
+      if (candidates.length) break;
+    } catch {}
+  }
+
+  const unique = [...new Set(candidates)];
+
+  if (!unique.length) {
+    throw new Error('ZEROZERO_TEAM_NOT_FOUND');
+  }
+
+  for (const url of unique.slice(0, 12)) {
+    try {
+      const page = await fetchText(url, {
+        timeoutMs: 12000,
+        jina: true
+      });
+
       const numFpf = extractZeroZeroFpfNumber(page);
-      if (String(numFpf || '') !== String(fpfNumber)) continue;
-      const logoUrl = extractZeroZeroLogo(page, candidate.href);
+
+      // REGRA CRÍTICA:
+      // o ZeroZero só é aceite se o Num.FPF for exactamente igual.
+      if (String(numFpf || '') !== String(fpfNumber)) {
+        continue;
+      }
+
+      const logoUrl = extractLogoUrl(page, url);
+
       if (!logoUrl) continue;
+
       return {
-        name: extractTitle(page) || candidate.text || fpfName,
+        name: extractTitle(page) || fpfName,
         numFpf: String(numFpf),
-        pageUrl: candidate.href,
+        pageUrl: url,
         imageUrl: logoUrl
       };
-    } catch {
-      // Continue through candidate pages.
-    }
+    } catch {}
   }
 
   throw new Error('ZEROZERO_NUM_FPF_NOT_CONFIRMED');
@@ -275,14 +295,23 @@ function safeFilename(name) {
     .trim() || 'escudo';
 }
 
-function teamVariants(team) {
+function variants(team) {
   const raw = clean(team);
-  return [...new Set([
-    raw,
-    raw.replace(/\s*\/\s*OAF\b/ig, '').replace(/\bSAD\b/ig, '').replace(/\bSDUQ\b/ig, '').replace(/\s+/g, ' ').trim(),
-    raw.replace(/\bSAD\b/ig, '').replace(/\bSDUQ\b/ig, '').replace(/\bOAF\b/ig, '').replace(/\s+/g, ' ').trim(),
-    raw.replace(/[,.]/g, '').replace(/\s+/g, ' ').trim()
-  ])].filter(Boolean);
+
+  return [
+    ...new Set([
+      raw,
+      raw
+        .replace(/\s*\/\s*OAF\b/ig, '')
+        .replace(/\b(?:SAD|SDUQ|OAF)\b/ig, '')
+        .replace(/\s+/g, ' ')
+        .trim(),
+      raw
+        .replace(/[,.]/g, '')
+        .replace(/\s+/g, ' ')
+        .trim()
+    ])
+  ].filter(Boolean);
 }
 
 function dataUrl(mime, buffer) {
@@ -293,22 +322,39 @@ async function downloadImage(url) {
   const response = await fetch(url, {
     redirect: 'follow',
     headers: {
-      'User-Agent': process.env.FPF_ZEROZERO_USER_AGENT || DEFAULT_UA,
+      'User-Agent': UA,
       Accept: 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8'
     }
   });
-  if (!response.ok) throw new Error(`ZEROZERO_IMAGE_HTTP_${response.status}`);
-  const type = (response.headers.get('content-type') || 'image/png').split(';')[0].toLowerCase();
-  if (!type.startsWith('image/')) throw new Error('ZEROZERO_IMAGE_INVALID_TYPE');
+
+  if (!response.ok) {
+    throw new Error(`ZEROZERO_IMAGE_HTTP_${response.status}`);
+  }
+
+  const mime =
+    (response.headers.get('content-type') || 'image/png')
+      .split(';')[0]
+      .toLowerCase();
+
+  if (!mime.startsWith('image/')) {
+    throw new Error('ZEROZERO_IMAGE_INVALID_TYPE');
+  }
+
   const buffer = Buffer.from(await response.arrayBuffer());
-  if (!buffer.length) throw new Error('ZEROZERO_IMAGE_EMPTY');
-  return { mime: type, buffer };
+
+  if (!buffer.length) {
+    throw new Error('ZEROZERO_IMAGE_EMPTY');
+  }
+
+  return { mime, buffer };
 }
 
 async function githubRequest(path, options = {}) {
   const token = process.env.GITHUB_TOKEN;
+
   if (!token) return null;
-  const response = await fetch(`${GITHUB_API}${path}`, {
+
+  return fetch(`${GITHUB_API}${path}`, {
     ...options,
     headers: {
       Accept: 'application/vnd.github+json',
@@ -318,106 +364,212 @@ async function githubRequest(path, options = {}) {
       ...(options.headers || {})
     }
   });
-  return response;
-}
-
-function extForMime(mime) {
-  if (mime === 'image/svg+xml') return 'svg';
-  if (mime === 'image/webp') return 'webp';
-  if (mime === 'image/jpeg' || mime === 'image/jpg') return 'jpg';
-  return 'png';
 }
 
 async function getCachedShield(team) {
   const repo = process.env.GITHUB_REPO;
   const branch = process.env.GITHUB_BRANCH || 'main';
+
   if (!repo) return null;
 
-  const candidates = [];
-  for (const variant of teamVariants(team)) {
-    for (const ext of ['png', 'jpg', 'jpeg', 'webp', 'svg']) {
-      candidates.push(`${safeFilename(variant)}.${ext}`);
+  for (const name of variants(team)) {
+    const filename = `${safeFilename(name)}.png`;
+    const path = `public/escudos/${filename}`;
+    const encoded =
+      path.split('/').map(encodeURIComponent).join('/');
+
+    const response = await githubRequest(
+      `/repos/${repo}/contents/${encoded}?ref=${encodeURIComponent(branch)}`
+    );
+
+    if (!response?.ok) continue;
+
+    const body = await response.json();
+
+    if (!body?.download_url) continue;
+
+    const image = await fetch(body.download_url, {
+      redirect: 'follow'
+    });
+
+    if (!image.ok) continue;
+
+    const mime =
+      (image.headers.get('content-type') || 'image/png')
+        .split(';')[0];
+
+    const buffer =
+      Buffer.from(await image.arrayBuffer());
+
+    if (buffer.length) {
+      return {
+        mime,
+        buffer,
+        path
+      };
     }
   }
 
-  for (const filename of [...new Set(candidates)]) {
-    const encodedPath = `public/escudos/${filename.split('/').map(encodeURIComponent).join('/')}`;
-    const response = await githubRequest(`/repos/${repo}/contents/${encodedPath}?ref=${encodeURIComponent(branch)}`);
-    if (!response || !response.ok) continue;
-    const body = await response.json();
-    if (!body?.download_url) continue;
-
-    const image = await fetch(body.download_url, { redirect: 'follow' });
-    if (!image.ok) continue;
-    const mime = (image.headers.get('content-type') || 'image/png').split(';')[0];
-    const buffer = Buffer.from(await image.arrayBuffer());
-    if (buffer.length) return { mime, buffer, cached: true, path: `public/escudos/${filename}` };
-  }
   return null;
 }
 
 async function saveCachedShield(team, mime, buffer) {
   const repo = process.env.GITHUB_REPO;
   const branch = process.env.GITHUB_BRANCH || 'main';
-  if (!repo || !process.env.GITHUB_TOKEN) return null;
 
-  const ext = extForMime(mime);
-  const filename = `${safeFilename(team)}.${ext}`;
-  const path = `public/escudos/${filename}`;
-  const encodedPath = path.split('/').map(encodeURIComponent).join('/');
-  const existing = await githubRequest(`/repos/${repo}/contents/${encodedPath}?ref=${encodeURIComponent(branch)}`);
+  if (!repo || !process.env.GITHUB_TOKEN) {
+    return null;
+  }
+
+  const extension =
+    mime === 'image/svg+xml'
+      ? 'svg'
+      : mime === 'image/webp'
+        ? 'webp'
+        : mime.includes('jpeg')
+          ? 'jpg'
+          : 'png';
+
+  const path =
+    `public/escudos/${safeFilename(team)}.${extension}`;
+
+  const encoded =
+    path.split('/').map(encodeURIComponent).join('/');
+
+  const existing = await githubRequest(
+    `/repos/${repo}/contents/${encoded}?ref=${encodeURIComponent(branch)}`
+  );
+
   let sha = null;
-  if (existing?.ok) sha = (await existing.json()).sha || null;
-  else if (existing && existing.status !== 404) return null;
 
-  const response = await githubRequest(`/repos/${repo}/contents/${encodedPath}`, {
-    method: 'PUT',
-    body: JSON.stringify({
-      message: `Atualizar escudo: ${safeFilename(team)}`,
-      content: buffer.toString('base64'),
-      branch,
-      ...(sha ? { sha } : {})
-    })
-  });
+  if (existing?.ok) {
+    sha = (await existing.json()).sha || null;
+  } else if (existing && existing.status !== 404) {
+    return null;
+  }
+
+  const payload = {
+    message:
+      `Adicionar escudo validado: ${safeFilename(team)}`,
+    content: buffer.toString('base64'),
+    branch,
+    ...(sha ? { sha } : {})
+  };
+
+  const response = await githubRequest(
+    `/repos/${repo}/contents/${encoded}`,
+    {
+      method: 'PUT',
+      body: JSON.stringify(payload)
+    }
+  );
+
   if (!response?.ok) return null;
-  return { path, commit: (await response.json()).commit?.sha || null };
+
+  const body = await response.json();
+
+  return {
+    path,
+    commit: body.commit?.sha || null
+  };
 }
 
 export async function resolveShield(team) {
   const requested = clean(team);
-  if (!requested) throw new Error('TEAM_REQUIRED');
 
-  const cached = await getCachedShield(requested);
-  if (cached) {
-    return {
-      ok: true,
-      team: requested,
-      imageDataUrl: dataUrl(cached.mime, cached.buffer),
-      source: 'GitHub cache',
-      cached: true,
-      savedPath: cached.path
-    };
+  if (!requested) {
+    throw new Error('TEAM_REQUIRED');
   }
 
-  const fpf = await searchFpf(requested);
-  const zerozero = await searchZeroZero(fpf.fpfNumber, fpf.name);
-  const image = await downloadImage(zerozero.imageUrl);
-  const saved = await saveCachedShield(requested, image.mime, image.buffer);
+  const key = normalize(requested);
 
-  return {
-    ok: true,
-    team: requested,
-    fpfName: fpf.name,
-    fpfNumber: fpf.fpfNumber,
-    fpfPage: fpf.url,
-    zeroZeroTeam: zerozero.name,
-    zeroZeroNumFpf: zerozero.numFpf,
-    zeroZeroPage: zerozero.pageUrl,
-    zeroZeroImage: zerozero.imageUrl,
-    imageDataUrl: dataUrl(image.mime, image.buffer),
-    source: 'FPF → ZeroZero',
-    cached: false,
-    saved: Boolean(saved),
-    savedPath: saved?.path || null
-  };
+  // Evita duas pesquisas simultâneas para a mesma equipa.
+  if (memory.has(key)) {
+    return memory.get(key);
+  }
+
+  if (inFlight.has(key)) {
+    return inFlight.get(key);
+  }
+
+  const job = (async () => {
+    // 1 — cache
+    const cached = await getCachedShield(requested);
+
+    if (cached) {
+      const result = {
+        ok: true,
+        team: requested,
+        imageDataUrl: dataUrl(cached.mime, cached.buffer),
+        source: 'GitHub cache',
+        cached: true,
+        savedPath: cached.path
+      };
+
+      memory.set(key, result);
+      return result;
+    }
+
+    // 2 — FPF
+    const fpf = await searchFpf(requested);
+
+    // 3 — ZeroZero usando EXCLUSIVAMENTE o Nº FPF
+    const zerozero =
+      await searchZeroZero(
+        fpf.fpfNumber,
+        fpf.name
+      );
+
+    // 4 — validação definitiva
+    if (
+      String(zerozero.numFpf) !==
+      String(fpf.fpfNumber)
+    ) {
+      throw new Error('ZEROZERO_FPF_MISMATCH');
+    }
+
+    // 5 — download
+    const image =
+      await downloadImage(zerozero.imageUrl);
+
+    // 6 — cache persistente no GitHub
+    const saved =
+      await saveCachedShield(
+        requested,
+        image.mime,
+        image.buffer
+      );
+
+    const result = {
+      ok: true,
+      team: requested,
+
+      fpfName: fpf.name,
+      fpfNumber: fpf.fpfNumber,
+      fpfPage: fpf.url,
+
+      zeroZeroTeam: zerozero.name,
+      zeroZeroNumFpf: zerozero.numFpf,
+      zeroZeroPage: zerozero.pageUrl,
+      zeroZeroImage: zerozero.imageUrl,
+
+      imageDataUrl:
+        dataUrl(image.mime, image.buffer),
+
+      source: 'FPF → ZeroZero',
+      cached: false,
+      saved: Boolean(saved),
+      savedPath: saved?.path || null
+    };
+
+    memory.set(key, result);
+
+    return result;
+  })().finally(() => {
+    inFlight.delete(key);
+  });
+
+  inFlight.set(key, job);
+
+  return job;
 }
