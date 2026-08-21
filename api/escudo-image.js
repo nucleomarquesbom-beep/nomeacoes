@@ -1,146 +1,42 @@
-import {
-  resolveShield
-} from './shield-service.mjs';
+import { resolveShield } from './shield-service.mjs';
 
-function stripExtension(
-  value = ''
-) {
+function stripExtension(value = '') {
   return String(value)
-    .replace(
-      /\.(?:png|jpe?g|webp|svg)$/i,
-      ''
-    )
+    .replace(/\.(?:png|jpe?g|webp|svg)$/i, '')
     .trim();
 }
 
-function parseDataUrl(
-  dataUrl
-) {
-  const match =
-    String(dataUrl || '')
-      .match(
-        /^data:(image\/[^;]+);base64,([\s\S]+)$/
-      );
-
-  if (!match) return null;
-
-  return {
-    mime:
-      match[1].toLowerCase(),
-    buffer:
-      Buffer.from(
-        match[2],
-        'base64'
-      )
-  };
+function parseDataUrl(value) {
+  const m = String(value || '').match(/^data:(image\/[^;]+);base64,([\s\S]+)$/);
+  if (!m) return null;
+  return { mime: m[1].toLowerCase(), buffer: Buffer.from(m[2], 'base64') };
 }
 
-export default async function handler(
-  req,
-  res
-) {
+export default async function handler(req, res) {
   if (req.method !== 'GET') {
-    res.setHeader(
-      'Allow',
-      'GET'
-    );
-
-    return res
-      .status(405)
-      .end(
-        'Method Not Allowed'
-      );
+    res.setHeader('Allow', 'GET');
+    return res.status(405).end('Method Not Allowed');
   }
 
-  const team =
-    stripExtension(
-      req.query?.team || ''
-    );
-
-  if (!team) {
-    return res.status(400).json({
-      ok: false,
-      error: 'TEAM_REQUIRED'
-    });
-  }
+  const team = stripExtension(req.query?.team || '');
+  if (!team) return res.status(400).end();
 
   try {
-    const result =
-      await resolveShield(team);
+    const result = await resolveShield(team);
+    if (!result?.ok || !result.imageDataUrl) return res.status(404).end();
 
-    const image =
-      parseDataUrl(
-        result.imageDataUrl
-      );
+    const image = parseDataUrl(result.imageDataUrl);
+    if (!image?.buffer?.length) return res.status(404).end();
 
-    if (!image) {
-      return res.status(502).json({
-        ok: false,
-        team,
-        error:
-          'IMAGE_DATA_INVALID'
-      });
-    }
-
-    res.setHeader(
-      'Content-Type',
-      image.mime
-    );
-
-    res.setHeader(
-      'Content-Length',
-      String(
-        image.buffer.length
-      )
-    );
-
-    res.setHeader(
-      'Cache-Control',
-      'public, max-age=3600, s-maxage=86400, stale-while-revalidate=604800'
-    );
-
-    res.setHeader(
-      'X-Shield-Source',
-      result.source ||
-        'FPF->ZeroZero'
-    );
-
-    return res
-      .status(200)
-      .send(image.buffer);
+    res.setHeader('Content-Type', image.mime);
+    res.setHeader('Content-Length', String(image.buffer.length));
+    res.setHeader('Cache-Control', 'public, max-age=86400, s-maxage=604800, stale-while-revalidate=2592000');
+    res.setHeader('X-Shield-Source', result.source || 'FPF->ZeroZero');
+    if (result.fpfNumber) res.setHeader('X-FPF-Number', result.fpfNumber);
+    if (result.zeroZeroNumFpf) res.setHeader('X-ZeroZero-Num-FPF', result.zeroZeroNumFpf);
+    return res.status(200).send(image.buffer);
   } catch (error) {
-    const code =
-      error?.message ||
-      'SHIELD_NOT_FOUND';
-
-    console.error(
-      '[ESCUDO-IMAGE]',
-      {
-        team,
-        code
-      }
-    );
-
-    res.setHeader(
-      'X-Shield-Error',
-      code
-    );
-
-    return res.status(
-      code ===
-        'FPF_NUMBER_NOT_FOUND' ||
-      code ===
-        'FPF_DIRECTORY_EMPTY' ||
-      code ===
-        'ZEROZERO_TEAM_NOT_FOUND' ||
-      code ===
-        'ZEROZERO_NUM_FPF_NOT_CONFIRMED'
-        ? 404
-        : 502
-    ).json({
-      ok: false,
-      team,
-      error: code
-    });
+    console.error('[ESCUDO-IMAGE]', { team, error: error?.message || error });
+    return res.status(404).end();
   }
 }

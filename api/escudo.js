@@ -1,99 +1,51 @@
-import {
-  resolveShield,
-  resolveShields
-} from './shield-service.mjs';
+import { resolveShield, resolveShields } from './shield-service.mjs';
 
-function parseBody(req) {
-  if (
-    req.body &&
-    typeof req.body === 'object'
-  ) {
-    return req.body;
-  }
-
-  try {
-    return JSON.parse(
-      req.body || '{}'
-    );
-  } catch {
-    return {};
-  }
+function jsonBody(req) {
+  if (req.body && typeof req.body === 'object') return req.body;
+  try { return JSON.parse(req.body || '{}'); } catch { return {}; }
 }
 
-export default async function handler(
-  req,
-  res
-) {
-  if (req.method === 'GET') {
-    const team =
-      String(
-        req.query?.team || ''
-      ).trim();
+function sendError(res, status, team, error, extra = {}) {
+  console.error('[ESCUDO]', { team, error, ...extra });
+  return res.status(status).json({ ok: false, team, error, ...extra });
+}
 
-    if (!team) {
-      return res.status(400).json({
-        ok: false,
-        error: 'TEAM_REQUIRED'
-      });
-    }
+export default async function handler(req, res) {
+  res.setHeader('Cache-Control', 'no-store');
+
+  if (req.method === 'GET') {
+    const team = String(req.query?.team || '').trim();
+    if (!team) return sendError(res, 400, '', 'TEAM_REQUIRED');
 
     try {
-      return res.status(200).json(
-        await resolveShield(team)
-      );
+      const result = await resolveShield(team);
+      return res.status(result.ok ? 200 : 404).json(result);
     } catch (error) {
-      const code =
-        error?.message ||
-        'SHIELD_NOT_FOUND';
-
-      console.error(
-        '[ESCUDO]',
-        { team, code }
-      );
-
-      return res.status(502).json({
-        ok: false,
-        team,
-        error: code
+      return sendError(res, 200, team, error?.message || 'SHIELD_NOT_FOUND', {
+        retriable: true
       });
     }
   }
 
   if (req.method === 'POST') {
-    const body =
-      parseBody(req);
+    const body = jsonBody(req);
+    const teams = Array.isArray(body.teams)
+      ? body.teams
+      : body.team ? [body.team] : [];
 
-    const teams =
-      Array.isArray(body.teams)
-        ? body.teams
-        : body.team
-          ? [body.team]
-          : [];
+    if (!teams.length) return sendError(res, 400, '', 'TEAMS_REQUIRED');
+    if (teams.length > 100) return sendError(res, 413, '', 'TOO_MANY_TEAMS');
 
-    if (!teams.length) {
-      return res.status(400).json({
-        ok: false,
-        error: 'TEAMS_REQUIRED'
+    try {
+      const result = await resolveShields(teams);
+      return res.status(200).json(result);
+    } catch (error) {
+      return sendError(res, 200, '', error?.message || 'SHIELD_BATCH_FAILED', {
+        retriable: true
       });
     }
-
-    const result =
-      await resolveShields(
-        teams
-      );
-
-    return res.status(200).json(
-      result
-    );
   }
 
-  res.setHeader(
-    'Allow',
-    'GET, POST'
-  );
-
-  return res.status(405).json({
-    ok: false,
-    error: 'METHOD_NOT_ALLOWED'
-  });
+  res.setHeader('Allow', 'GET, POST');
+  return sendError(res, 405, '', 'METHOD_NOT_ALLOWED');
 }
