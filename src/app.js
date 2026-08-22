@@ -1,14 +1,7 @@
 import * as pdfjsLib from 'pdfjs-dist/build/pdf.mjs';
 import pdfWorker from 'pdfjs-dist/build/pdf.worker.mjs?url';
 import JSZip from 'jszip';
-import {
-  normalizeText,
-  compact,
-  teamKey,
-  teamLookupName,
-  teamVariants
-} from '../shared/team-normalize.mjs';
-import { roleForPosition } from './core/roles.js';
+import { getTeamSearchName, getTeamDisplayName, getTeamKey } from '../shared/team-normalize.mjs';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
 
@@ -18,14 +11,26 @@ const state = {
   pages: [],
   games: [],
   names: new Map(),
-  assets: new Map(),
-  shieldWarmup: null,
-  localShieldManifest: null
+  assets: new Map()
 };
 
 /* =========================================================
    TEXTO / NORMALIZAÇÃO
    ========================================================= */
+
+function normalizeText(v = '') {
+  return String(v).toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[ºª°]/g, '')
+    .replace(/[^\p{L}\p{N}\s.'-]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function compact(v = '') {
+  return normalizeText(v).replace(/\s+/g, '');
+}
 
 function safeFile(v = '') {
   return String(v)
@@ -77,6 +82,40 @@ function findListedName(text) {
 
   return null;
 }
+
+function findListedInText(text) {
+  const normalized = normalizeText(text);
+  const compactText = compact(text);
+
+  const entries = [...state.names.entries()]
+    .sort((a, b) => b[0].length - a[0].length);
+
+  for (const [key, original] of entries) {
+    const target = normalizeText(original);
+    const pos = normalized.indexOf(target);
+
+    if (pos >= 0) {
+      return {
+        name: original,
+        normalizedStart: pos,
+        normalizedEnd: pos + target.length
+      };
+    }
+
+    const cpos = compactText.indexOf(key);
+
+    if (cpos >= 0) {
+      return {
+        name: original,
+        normalizedStart: cpos,
+        normalizedEnd: cpos + key.length
+      };
+    }
+  }
+
+  return null;
+}
+
 
 /* =========================================================
    IDENTIFICAÇÃO DAS LINHAS DO PDF
@@ -133,9 +172,60 @@ function hasAssociation(t) {
   return /\bA\.?\s*F\.?\s+/i.test(t);
 }
 
+function removeAssociation(t) {
+  return t.replace(/\s+A\.?\s*F\.?\s+.*$/i, '').trim();
+}
+
+function looksLikeGameLine(t) {
+  return hasAssociation(t) && /\s-\s/.test(t);
+}
+
+function looksLikeOfficialLine(t) {
+  return hasAssociation(t) && !/\s-\s/.test(t);
+}
+
+function splitGamePrefix(prefix) {
+  const clean = prefix.replace(/\s+/g, ' ').trim();
+  const dash = clean.lastIndexOf(' - ');
+
+  if (dash < 0) return null;
+
+  return {
+    home: clean.slice(0, dash).trim(),
+    away: clean.slice(dash + 3).trim()
+  };
+}
+
+
 /* =========================================================
    FUNÇÃO DOS OFICIAIS
    ========================================================= */
+
+function roleForPosition(index, competition, modality) {
+  if (modality === 'FUTSAL') {
+    if (index === 0) return 'Árbitro';
+    if (index === 1) return '2.º Árbitro';
+    if (index === 2) return '3.º Árbitro';
+    if (index === 3) return 'Cronometrista';
+
+    return 'Oficial';
+  }
+
+  if (isLiga3BPI(competition)) {
+    if (index === 0) return 'Árbitro';
+    if (index === 1) return '4.º Árbitro';
+    if (index === 2) return 'Assistente 1';
+    if (index === 3) return 'Assistente 2';
+
+    return 'Oficial';
+  }
+
+  if (index === 0) return 'Árbitro';
+  if (index === 1) return 'Assistente 1';
+  if (index === 2) return 'Assistente 2';
+
+  return 'Oficial';
+}
 
 function finalizeGame(current) {
   if (!current) return null;
@@ -532,6 +622,27 @@ function personUrls(name) {
 
   const urls = [];
 
+  /*
+   * A versão recortada tem prioridade absoluta.
+   * Se já existir, nunca voltamos a usar a fotografia
+   * original durante a composição.
+   */
+  for (const f of variants) {
+    for (const ext of [
+      'webp',
+      'png',
+      'jpg',
+      'jpeg'
+    ]) {
+      urls.push(
+        `/fotografias/recortadas/${encodeURIComponent(f)}.${ext}`
+      );
+    }
+  }
+
+  /*
+   * Compatibilidade com a biblioteca antiga.
+   */
   for (const f of variants) {
     for (const ext of [
       'jpg',
@@ -561,28 +672,229 @@ async function personImage(name) {
   );
 }
 
+/*
+ * Guarda uma fotografia já processada na biblioteca persistente.
+ *
+ * A API usa o token GitHub no servidor, nunca no browser.
+ * Se o GitHub/Vercel estiver temporariamente indisponível,
+ * a imagem continua disponível nesta sessão.
+ */
+async function saveProcessedPhoto(name, dataUrl) {
+  if (!dataUrl) return false;
+
+  try {
+    const response = await fetch(
+      '/api/foto',
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
+        body: JSON.stringify({
+          name,
+          dataUrl
+        })
+      }
+    );
+
+    if (!response.ok) {
+      const detail =
+        await response.text().catch(() => '');
+
+      console.warn(
+        'Não foi possível guardar a fotografia:',
+        name,
+        detail
+      );
+
+      return false;
+    }
+
+    return true;
+
+  } catch (error) {
+    console.warn(
+      'Erro ao guardar fotografia:',
+      name,
+      error
+    );
+
+    return false;
+  }
+}
+
+async function processAndStorePhoto(
+  name,
+  file
+) {
+  if (!file) return null;
+
+  try {
+    const {
+      removeBackground
+    } = await import(
+      './photo-processing.js'
+    );
+
+    const result =
+      await removeBackground(file);
+
+    if (!result?.dataUrl) {
+      throw new Error(
+        'A remoção do fundo não devolveu uma imagem válida.'
+      );
+    }
+
+    const img =
+      await tryImage(result.dataUrl);
+
+    if (!img) {
+      throw new Error(
+        'A fotografia processada não pôde ser carregada.'
+      );
+    }
+
+    state.assets.set(
+      'p:' + compact(name),
+      img
+    );
+
+    /*
+     * Persistência. Não bloqueia a utilização da
+     * fotografia se a gravação remota falhar.
+     */
+    const saved =
+      await saveProcessedPhoto(
+        name,
+        result.dataUrl
+      );
+
+    return {
+      img,
+      saved
+    };
+
+  } catch (error) {
+    console.error(
+      'Falha no processamento da fotografia:',
+      name,
+      error
+    );
+
+    /*
+     * Fallback seguro: se a remoção automática falhar,
+     * ainda utilizamos a fotografia original nesta sessão.
+     */
+    try {
+      const img =
+        await fileToImage(file);
+
+      state.assets.set(
+        'p:' + compact(name),
+        img
+      );
+
+      return {
+        img,
+        saved: false,
+        fallback: true
+      };
+
+    } catch {
+      return null;
+    }
+  }
+}
+
 
 /* =========================================================
    ESCUDOS
    ========================================================= */
 
 /*
- * PESQUISA ONLINE
+ * A biblioteca local NÃO é descoberta tentando ficheiros às cegas.
+ * Isso provocava dezenas/centenas de 404 no browser.
  *
- * Esta função só é chamada depois de terminar
- * a pesquisa LOCAL de todos os clubes.
+ * O endpoint /api/escudos-local lê public/escudos no servidor e devolve
+ * um inventário real dos ficheiros existentes.
+ *
+ * Ordem:
+ *   1. inventário local real
+ *   2. escudo local
+ *   3. API FPF/ZeroZero apenas se faltar localmente
  */
-async function searchRemoteShield(
-  team,
-  timeoutMs = 4500
-) {
-  const lookupTeam = teamLookupName(team);
-  const lookupKey = teamKey(lookupTeam);
+let localShieldInventory = new Map();
+let localShieldInventoryLoaded = false;
+let localShieldInventoryPromise = null;
 
-  if (!lookupTeam || !lookupKey) return null;
+function normalizedTeamForShield(team) {
+  if (typeof team !== 'string') return '';
+  return getTeamSearchName(team.trim());
+}
 
-  const key = 'remoteShield:' + lookupKey;
+async function loadLocalShieldInventory() {
+  if (localShieldInventoryLoaded) {
+    return localShieldInventory;
+  }
 
+  if (localShieldInventoryPromise) {
+    return localShieldInventoryPromise;
+  }
+
+  localShieldInventoryPromise = (async () => {
+    try {
+      const response = await fetch('/api/escudos-local', {
+        headers: {
+          'Accept': 'application/json'
+        },
+        cache: 'no-store'
+      });
+
+      if (!response.ok) {
+        console.warn(
+          `Inventário local de escudos indisponível (${response.status}).`
+        );
+        return localShieldInventory;
+      }
+
+      const data = await response.json();
+      const shields = data?.shields || {};
+
+      localShieldInventory = new Map(
+        Object.entries(shields)
+      );
+
+      localShieldInventoryLoaded = true;
+
+      console.info(
+        `Inventário local de escudos carregado: ${localShieldInventory.size}`
+      );
+
+      return localShieldInventory;
+    } catch (error) {
+      console.warn(
+        'Erro ao carregar inventário local de escudos:',
+        error
+      );
+      return localShieldInventory;
+    } finally {
+      localShieldInventoryPromise = null;
+    }
+  })();
+
+  return localShieldInventoryPromise;
+}
+
+async function searchRemoteShield(team, timeoutMs = 7000) {
+  const searchName = normalizedTeamForShield(team);
+
+  // Nunca chamar a API com uma equipa vazia ou apenas com um sufixo.
+  if (!searchName) {
+    return null;
+  }
+
+  const key = 'remoteShield:' + getTeamKey(searchName);
   const cached = state.assets.get(key);
 
   if (cached) {
@@ -590,7 +902,6 @@ async function searchRemoteShield(
   }
 
   const controller = new AbortController();
-
   const timer = setTimeout(
     () => controller.abort(),
     timeoutMs
@@ -598,7 +909,7 @@ async function searchRemoteShield(
 
   try {
     const r = await fetch(
-      `/api/escudo?team=${encodeURIComponent(lookupTeam)}`,
+      `/api/escudo?team=${encodeURIComponent(searchName)}`,
       {
         headers: {
           'Accept': 'application/json'
@@ -612,7 +923,6 @@ async function searchRemoteShield(
     }
 
     const data = await r.json();
-
     const imageSrc = data?.imageDataUrl;
 
     if (!imageSrc) {
@@ -625,179 +935,118 @@ async function searchRemoteShield(
       return null;
     }
 
+    const assetKey = 's:' + getTeamKey(searchName);
+
     state.assets.set(key, img);
-
+    state.assets.set(assetKey, img);
     state.assets.set(
-      's:' + compact(team),
-      img
-    );
-
-    state.assets.set(
-      's:' + teamKey(lookupTeam),
-      img
-    );
-
-    state.assets.set(
-      'source:' + compact(team),
-      data.source || ''
-    );
-
-    state.assets.set(
-      'source:' + teamKey(lookupTeam),
-      data.source || ''
+      'source:' + getTeamKey(searchName),
+      data.source || 'API'
     );
 
     return img;
-
   } catch (e) {
     if (e?.name !== 'AbortError') {
       console.warn(
         'Pesquisa automática de escudo falhou:',
-        team,
+        searchName,
         e
       );
     }
 
     return null;
-
   } finally {
     clearTimeout(timer);
   }
 }
 
-
-/*
- * PESQUISA LOCAL
- *
- * IMPORTANTE:
- * Esta função é executada para TODOS os clubes
- * antes de qualquer pesquisa online.
- */
-async function loadLocalShieldManifest() {
-  if (state.localShieldManifest) {
-    return state.localShieldManifest;
-  }
-
-  try {
-    const r = await fetch('/api/escudos-local', {
-      headers: { Accept: 'application/json' },
-      cache: 'no-store'
-    });
-
-    if (!r.ok) {
-      state.localShieldManifest = new Map();
-      return state.localShieldManifest;
-    }
-
-    const data = await r.json();
-    const map = new Map();
-
-    for (const item of Array.isArray(data?.files) ? data.files : []) {
-      if (!item?.key || !item?.url) continue;
-      map.set(item.key, item.url);
-    }
-
-    state.localShieldManifest = map;
-    return map;
-  } catch (error) {
-    console.warn('Não foi possível carregar o inventário local de escudos:', error);
-    state.localShieldManifest = new Map();
-    return state.localShieldManifest;
-  }
-}
-
-function localShieldKey(value) {
-  return compact(teamLookupName(value));
-}
-
 async function shieldLocalImage(team) {
-  const lookupTeam = teamLookupName(team);
-  const key = 's:' + teamKey(lookupTeam);
+  const searchName = normalizedTeamForShield(team);
 
-  if (!lookupTeam || !teamKey(lookupTeam)) {
+  if (!searchName) {
     return null;
   }
 
+  const key = 's:' + getTeamKey(searchName);
+
   if (state.assets.has(key)) {
-    const img = state.assets.get(key);
-    state.assets.set('s:' + compact(team), img);
-    return img;
+    return state.assets.get(key);
   }
 
-  const manifest = await loadLocalShieldManifest();
-  const variants = teamVariants(team);
+  const inventory = await loadLocalShieldInventory();
+  const local = inventory.get(getTeamKey(searchName));
 
-  for (const variant of variants) {
-    const url = manifest.get(localShieldKey(variant));
-    if (!url) continue;
-
-    const img = await tryImage(url + '?v=7');
-    if (!img) continue;
-
-    state.assets.set(key, img);
-    state.assets.set('s:' + compact(team), img);
-    state.assets.set('source:' + key.slice(2), 'Biblioteca local do Núcleo');
-    return img;
+  if (!local) {
+    return null;
   }
 
-  return null;
+  // O endpoint já devolve o URL do ficheiro que realmente existe.
+  const imageSrc =
+    typeof local === 'string'
+      ? `/escudos/${encodeURIComponent(local)}`
+      : local?.url;
+
+  if (!imageSrc) {
+    return null;
+  }
+
+  const img = await tryImage(imageSrc);
+
+  if (!img) {
+    return null;
+  }
+
+  state.assets.set(key, img);
+  state.assets.set(
+    'source:' + getTeamKey(searchName),
+    'Biblioteca local do Núcleo'
+  );
+
+  return img;
 }
 
-
-/*
- * FASE 1:
- * Apenas pesquisa local.
- */
 async function prepareOneShieldLocal(team) {
   return !!(await shieldLocalImage(team));
 }
 
-
-/*
- * PREFETCH DOS ESCUDOS
- *
- * ORDEM OBRIGATÓRIA:
- *
- * 1. Procurar TODOS localmente.
- * 2. Identificar os que faltam.
- * 3. Só depois pesquisar online os que faltam.
- */
 async function prefetchShields(games) {
   const teams = new Map();
 
-  for (const game of games) {
-    for (const team of [game.home, game.away]) {
-      const lookupTeam = teamLookupName(team);
-      const key = teamKey(lookupTeam);
+  for (const g of games) {
+    const home = normalizedTeamForShield(g.home);
+    const away = normalizedTeamForShield(g.away);
 
-      /* Nunca pesquisar nem chamar a API com equipa vazia. */
-      if (!lookupTeam || !key) continue;
+    if (home) {
+      teams.set(getTeamKey(home), g.home);
+    }
 
-      teams.set(key, lookupTeam);
+    if (away) {
+      teams.set(getTeamKey(away), g.away);
     }
   }
 
   const uniqueTeams = [...teams.values()];
   const started = performance.now();
 
-  /*
-   * FASE 1 — procurar TODOS os escudos na biblioteca local.
-   */
+  // Carrega o inventário UMA vez. Não há probing de extensões.
+  await loadLocalShieldInventory();
+
+  // Primeiro: todos os escudos locais.
   await Promise.all(
     uniqueTeams.map(team =>
       prepareOneShieldLocal(team)
     )
   );
 
-  /*
-   * FASE 2 — só os que não existem localmente seguem para
-   * a pesquisa oficial/ZeroZero no backend.
-   */
+  // Depois: apenas os que realmente não existem localmente.
   const missingTeams = uniqueTeams.filter(
-    team =>
-      !state.assets.has(
-        's:' + teamKey(team)
-      )
+    team => {
+      const searchName = normalizedTeamForShield(team);
+      return searchName &&
+        !state.assets.has(
+          's:' + getTeamKey(searchName)
+        );
+    }
   );
 
   await Promise.all(
@@ -807,29 +1056,27 @@ async function prefetchShields(games) {
   );
 
   const found = uniqueTeams.filter(
-    team =>
-      state.assets.has(
-        's:' + teamKey(team)
-      )
+    team => {
+      const searchName = normalizedTeamForShield(team);
+      return searchName &&
+        state.assets.has(
+          's:' + getTeamKey(searchName)
+        );
+    }
   ).length;
 
   const localFound =
-    uniqueTeams.length -
-    missingTeams.length;
-
-  const onlineFound =
-    found - localFound;
+    uniqueTeams.length - missingTeams.length;
 
   return {
     total: uniqueTeams.length,
     found,
     local: localFound,
-    online: onlineFound,
+    online: Math.max(0, found - localFound),
     seconds:
       (performance.now() - started) / 1000
   };
 }
-
 
 /* =========================================================
    DESENHO
@@ -1361,280 +1608,290 @@ function drawOfficialCard(
   w,
   h
 ) {
-  /*
-   * CARTÃO FOTOGRÁFICO
-   *
-   * A fotografia continua a ser a fotografia original.
-   * Não existe remoção automática do fundo.
-   *
-   * A composição adapta-se ao espaço disponível:
-   * - cartões largos: fotografia dominante;
-   * - cartões pequenos: fotografia + faixa de texto compacta.
-   */
-
   const photo =
     state.assets.get(
       'p:' + compact(official.name)
     ) || null;
 
-  const radius =
-    Math.max(
-      14,
-      Math.round(
-        Math.min(w, h) * 0.025
-      )
-    );
-
-  const border =
-    Math.max(
-      8,
-      Math.round(
-        Math.min(w, h) * 0.018
-      )
-    );
-
   /*
-   * A fotografia ocupa a maior parte do cartão.
-   * A faixa inferior fica reservada exclusivamente
-   * para a informação do oficial.
+   * O cartão é deliberadamente vertical.
+   * A fotografia domina a composição e o texto fica
+   * numa zona própria, para nunca competir com a pessoa.
    */
+  const compactCard =
+    w < 500 || h < 500;
+
   const textH =
+    compactCard
+      ? Math.min(105, Math.max(88, h * 0.28))
+      : Math.min(155, Math.max(125, h * 0.21));
+
+  const frameX =
+    x + (compactCard ? 18 : 34);
+
+  const frameW =
+    w - (compactCard ? 36 : 68);
+
+  const frameY =
+    y + (compactCard ? 10 : 18);
+
+  const frameH =
     Math.max(
-      92,
-      Math.min(
-        150,
-        h * 0.24
-      )
+      110,
+      h - textH - (compactCard ? 22 : 38)
     );
 
-  const photoX = x;
-  const photoY = y;
-  const photoW = w;
-  const photoH = h - textH;
-
   /*
-   * Sombra discreta para separar o cartão do fundo.
+   * Sombra/moldura.
    */
   ctx.save();
 
   ctx.shadowColor =
-    'rgba(0,0,0,.34)';
+    'rgba(0,0,0,.28)';
 
-  ctx.shadowBlur = 18;
-  ctx.shadowOffsetY = 7;
+  ctx.shadowBlur =
+    compactCard ? 10 : 18;
 
-  roundRect(
-    ctx,
-    x,
-    y,
-    w,
-    h,
-    radius,
-    '#f4f1e9'
+  ctx.shadowOffsetY =
+    compactCard ? 4 : 8;
+
+  ctx.fillStyle =
+    '#f4f1e9';
+
+  ctx.fillRect(
+    frameX,
+    frameY,
+    frameW,
+    frameH
   );
 
   ctx.restore();
 
   /*
-   * Fotografia.
-   *
-   * O recorte é feito apenas para preencher a área,
-   * mantendo a fotografia original. Não há remoção
-   * de fundo nem processamento de pessoa.
+   * Área interior. Não fazemos clip à pessoa:
+   * a transparência permite que a cabeça/ombros
+   * ultrapassem ligeiramente a moldura.
    */
-  ctx.save();
+  const innerX =
+    frameX + (compactCard ? 8 : 12);
 
-  ctx.beginPath();
+  const innerY =
+    frameY + (compactCard ? 8 : 12);
 
-  ctx.roundRect(
-    photoX + border,
-    photoY + border,
-    photoW - border * 2,
-    photoH - border,
-    Math.max(8, radius - 4)
-  );
+  const innerW =
+    frameW - (compactCard ? 16 : 24);
 
-  ctx.clip();
+  const innerH =
+    frameH - (compactCard ? 16 : 24);
 
   if (photo) {
-    drawCover(
-      ctx,
+    const iw =
+      photo.naturalWidth ||
+      photo.width ||
+      1;
+
+    const ih =
+      photo.naturalHeight ||
+      photo.height ||
+      1;
+
+    /*
+     * A pessoa é dimensionada pela altura e pela largura,
+     * mas nunca fica pequena dentro do cartão.
+     */
+    const maxW =
+      innerW * (
+        compactCard
+          ? 0.94
+          : 0.88
+      );
+
+    const maxH =
+      innerH * (
+        compactCard
+          ? 1.10
+          : 1.12
+      );
+
+    const scale =
+      Math.min(
+        maxW / iw,
+        maxH / ih
+      );
+
+    const dw =
+      iw * scale;
+
+    const dh =
+      ih * scale;
+
+    /*
+     * Anchor inferior: os pés/corpo ficam naturalmente
+     * assentes no fundo da fotografia.
+     */
+    const dx =
+      frameX +
+      (frameW - dw) / 2;
+
+    const dy =
+      frameY +
+      frameH -
+      dh +
+      (
+        compactCard
+          ? 18
+          : 28
+      );
+
+    ctx.save();
+
+    ctx.globalAlpha = 1;
+
+    ctx.drawImage(
       photo,
-      photoX + border,
-      photoY + border,
-      photoW - border * 2,
-      photoH - border,
-      0
+      dx,
+      dy,
+      dw,
+      dh
     );
+
+    ctx.restore();
+
   } else {
     ctx.fillStyle =
       '#596b73';
 
     ctx.fillRect(
-      photoX + border,
-      photoY + border,
-      photoW - border * 2,
-      photoH - border
+      innerX,
+      innerY,
+      innerW,
+      innerH
     );
   }
 
-  ctx.restore();
-
   /*
-   * Pequena linha dourada entre fotografia e texto.
+   * Zona textual.
+   *
+   * Cores exatamente alinhadas com o resto da publicação:
+   * dourado #e7b63d + branco #f5f7f8.
    */
+  const textY =
+    y + h - textH;
+
+  ctx.fillStyle =
+    'rgba(16,34,43,.97)';
+
+  ctx.fillRect(
+    x,
+    textY,
+    w,
+    textH
+  );
+
   ctx.fillStyle =
     '#e7b63d';
 
   ctx.fillRect(
-    x + border,
-    photoY + photoH - 3,
-    w - border * 2,
-    6
+    x,
+    textY,
+    w,
+    4
   );
 
-  /*
-   * FAIXA DE TEXTO
-   *
-   * O lettering usa as mesmas cores da publicação:
-   * dourado para função e AF Coimbra;
-   * branco para o nome.
-   */
   const centerX =
     x + w / 2;
 
-  const innerW =
-    w - border * 2 - 24;
+  const role =
+    String(
+      official.role || 'Árbitro'
+    )
+      .toUpperCase();
 
-  const compactCard =
-    w < 500 || h < 430;
+  const name =
+    String(
+      official.name || ''
+    )
+      .toUpperCase();
 
+  /*
+   * Lettering: hierarquia visual consistente.
+   */
   const roleSize =
-    compactCard
-      ? Math.max(
-          17,
-          Math.min(
-            23,
-            textH * 0.20
-          )
-        )
-      : Math.max(
-          21,
-          Math.min(
-            30,
-            textH * 0.22
-          )
-        );
-
-  const nameStart =
-    compactCard
-      ? Math.max(
-          27,
-          Math.min(
-            42,
-            textH * 0.34
-          )
-        )
-      : Math.max(
-          34,
-          Math.min(
-            56,
-            textH * 0.39
-          )
-        );
-
-  const nameMin =
-    compactCard ? 18 : 22;
+    fit(
+      ctx,
+      role,
+      w - 30,
+      compactCard ? 18 : 25,
+      14
+    );
 
   const nameSize =
     fit(
       ctx,
-      official.name.toUpperCase(),
-      innerW,
-      nameStart,
-      nameMin
+      name,
+      w - 30,
+      compactCard ? 28 : 44,
+      compactCard ? 19 : 25
     );
 
-  ctx.font =
-    `900 ${nameSize}px Arial`;
+  const afSize =
+    fit(
+      ctx,
+      'A.F. COIMBRA',
+      w - 30,
+      compactCard ? 15 : 21,
+      12
+    );
+
+  ctx.textAlign =
+    'center';
+
+  const roleLine =
+    roleSize + 4;
 
   const nameLines =
     wrapLines(
       ctx,
-      official.name.toUpperCase(),
-      innerW,
-      2
+      name,
+      w - 30,
+      compactCard ? 2 : 2
     );
 
   const nameLineHeight =
-    nameSize +
-    (compactCard ? 2 : 5);
-
-  const afSize =
-    compactCard
-      ? Math.max(
-          15,
-          Math.min(
-            20,
-            textH * 0.16
-          )
-        )
-      : Math.max(
-          17,
-          Math.min(
-            23,
-            textH * 0.17
-          )
-        );
-
-  const roleGap =
-    compactCard ? 5 : 8;
-
-  const nameGap =
-    compactCard ? 4 : 7;
+    nameSize + 2;
 
   const totalTextH =
-    roleSize +
-    roleGap +
-    nameLines.length * nameLineHeight +
-    nameGap +
+    roleLine +
+    7 +
+    nameLines.length *
+      nameLineHeight +
+    6 +
     afSize;
 
   let cursorY =
-    photoY +
-    photoH +
-    (
-      textH -
-      totalTextH
-    ) / 2;
-
-  /*
-   * FUNÇÃO
-   */
-  ctx.textAlign =
-    'center';
+    textY +
+    Math.max(
+      14,
+      (textH - totalTextH) / 2
+    );
 
   ctx.fillStyle =
     '#e7b63d';
 
   ctx.font =
-    `700 ${roleSize}px Arial`;
+    `800 ${roleSize}px Arial`;
 
   ctx.fillText(
-    official.role.toUpperCase(),
+    role,
     centerX,
     cursorY + roleSize
   );
 
   cursorY +=
-    roleSize +
-    roleGap;
+    roleLine + 7;
 
-  /*
-   * NOME
-   */
   ctx.fillStyle =
-    '#10222b';
+    '#f5f7f8';
 
   ctx.font =
     `900 ${nameSize}px Arial`;
@@ -1650,12 +1907,8 @@ function drawOfficialCard(
       nameLineHeight;
   }
 
-  cursorY +=
-    nameGap;
+  cursorY += 6;
 
-  /*
-   * ASSOCIAÇÃO
-   */
   ctx.fillStyle =
     '#e7b63d';
 
@@ -1667,10 +1920,8 @@ function drawOfficialCard(
     centerX,
     cursorY + afSize
   );
-
-  ctx.textAlign =
-    'left';
 }
+
 
 /* =========================================================
    NOME DA COMPETIÇÃO
@@ -2121,12 +2372,12 @@ function render(game) {
 
   const homeShield =
     state.assets.get(
-      's:' + teamKey(game.home)
+      's:' + getTeamKey(normalizedTeamForShield(game.home))
     ) || null;
 
   const awayShield =
     state.assets.get(
-      's:' + teamKey(game.away)
+      's:' + getTeamKey(normalizedTeamForShield(game.away))
     ) || null;
 
   drawTeamBlock(
@@ -2156,8 +2407,7 @@ function render(game) {
    */
 
   const officials =
-    game.officials
-      .slice(0, 4);
+    game.officials.slice(0, 4);
 
   const count =
     Math.max(
@@ -2180,142 +2430,147 @@ function render(game) {
   const bottom =
     1765;
 
-  /*
-   * A área de oficiais é composta de forma diferente
-   * consoante o número de fotografias.
-   *
-   * 1 → cartão grande e centrado
-   * 2 → 2 colunas
-   * 3 → 3 colunas
-   * 4 → grelha 2 x 2
-   *
-   * Isto evita a antiga divisão vertical "altura / count",
-   * que deixava 1 fotografia pequena e 4 fotografias
-   * demasiado comprimidas.
-   */
-  const areaX = 70;
-  const areaW = 940;
   const areaH =
     bottom - top;
 
-  const gap =
-    count === 1
-      ? 0
-      : count === 2
-        ? 26
-        : count === 3
-          ? 18
-          : 24;
-
-  let columns;
-  let rows;
-
-  if (count === 1) {
-    columns = 1;
-    rows = 1;
-  } else if (count === 2) {
-    columns = 2;
-    rows = 1;
-  } else if (count === 3) {
-    columns = 3;
-    rows = 1;
-  } else {
-    columns = 2;
-    rows = 2;
-  }
-
-  const cardW =
-    Math.floor(
-      (
-        areaW -
-        gap * (columns - 1)
-      ) / columns
-    );
-
-  const cardH =
-    Math.floor(
-      (
-        areaH -
-        gap * (rows - 1)
-      ) / rows
-    );
-
   /*
-   * Para 1 fotografia usamos uma largura ligeiramente
-   * menor que a área total e centramos o cartão.
-   * Assim a fotografia tem presença sem esmagar o resto
-   * da publicação.
+   * Layouts dedicados.
+   *
+   * Não dividimos simplesmente a altura pelo número
+   * de árbitros: cada quantidade recebe uma composição
+   * própria para Instagram 1080x1920.
    */
-  const singleW =
-    Math.min(
-      720,
-      areaW
+  if (count === 1) {
+    const w = 760;
+    const h = Math.min(820, areaH - 35);
+
+    drawOfficialCard(
+      ctx,
+      officials[0],
+      (1080 - w) / 2,
+      top + (areaH - h) / 2,
+      w,
+      h
     );
 
-  const singleH =
-    Math.min(
-      820,
-      areaH
+  } else if (count === 2) {
+    const gap = 28;
+    const w = Math.floor(
+      (900 - gap) / 2
     );
 
-  officials.forEach(
-    (official, i) => {
-      let x;
-      let y;
-      let w;
-      let h;
+    const h =
+      Math.min(
+        820,
+        areaH - 30
+      );
 
-      if (count === 1) {
-        w = singleW;
-        h = singleH;
+    const x1 =
+      (1080 - (w * 2 + gap)) / 2;
 
-        x =
-          areaX +
-          (
-            areaW -
-            w
-          ) / 2;
+    drawOfficialCard(
+      ctx,
+      officials[0],
+      x1,
+      top + (areaH - h) / 2,
+      w,
+      h
+    );
 
-        y =
-          top +
-          (
-            areaH -
-            h
-          ) / 2;
+    drawOfficialCard(
+      ctx,
+      officials[1],
+      x1 + w + gap,
+      top + (areaH - h) / 2,
+      w,
+      h
+    );
 
-      } else {
+  } else if (count === 3) {
+    const gap = 18;
+    const w = Math.floor(
+      (940 - gap * 2) / 3
+    );
+
+    const h =
+      Math.min(
+        820,
+        areaH - 28
+      );
+
+    const totalW =
+      w * 3 + gap * 2;
+
+    const x0 =
+      (1080 - totalW) / 2;
+
+    officials.forEach(
+      (official, i) => {
+        drawOfficialCard(
+          ctx,
+          official,
+          x0 + i * (w + gap),
+          top + (areaH - h) / 2,
+          w,
+          h
+        );
+      }
+    );
+
+  } else {
+    /*
+     * Quatro oficiais: grelha 2x2.
+     * Assim cada fotografia continua a ter presença
+     * visual e o espaço não fica comprimido em quatro
+     * faixas horizontais.
+     */
+    const gapX = 24;
+    const gapY = 24;
+
+    const w = 440;
+    const h = Math.min(
+      405,
+      Math.floor(
+        (areaH - gapY) / 2
+      )
+    );
+
+    const totalW =
+      w * 2 + gapX;
+
+    const x0 =
+      (1080 - totalW) / 2;
+
+    const totalH =
+      h * 2 + gapY;
+
+    const y0 =
+      top +
+      Math.max(
+        0,
+        (areaH - totalH) / 2
+      );
+
+    officials.forEach(
+      (official, i) => {
         const col =
-          i % columns;
+          i % 2;
 
         const row =
-          Math.floor(
-            i / columns
-          );
+          Math.floor(i / 2);
 
-        w = cardW;
-        h = cardH;
-
-        x =
-          areaX +
-          col *
-            (cardW + gap);
-
-        y =
-          top +
-          row *
-            (cardH + gap);
+        drawOfficialCard(
+          ctx,
+          official,
+          x0 + col * (w + gapX),
+          y0 + row * (h + gapY),
+          w,
+          h
+        );
       }
+    );
+  }
 
-      drawOfficialCard(
-        ctx,
-        official,
-        Math.round(x),
-        Math.round(y),
-        Math.round(w),
-        Math.round(h)
-      );
-    }
-  );
 
   /*
    * ======================================================
@@ -2451,7 +2706,7 @@ async function checkAssets(games) {
   for (const g of games) {
     if (
       !state.assets.has(
-        's:' + teamKey(g.home)
+        's:' + getTeamKey(normalizedTeamForShield(g.home))
       )
     ) {
       missing.push({
@@ -2462,7 +2717,7 @@ async function checkAssets(games) {
 
     if (
       !state.assets.has(
-        's:' + teamKey(g.away)
+        's:' + getTeamKey(normalizedTeamForShield(g.away))
       )
     ) {
       missing.push({
@@ -2600,53 +2855,44 @@ function renderMissing(items) {
           input.dataset.key
             .split('|');
 
-        const file =
-          input.files[0];
+        if (type === 'foto') {
+          setStatus(
+            `A preparar a fotografia de ${key}...`
+          );
+
+          const result =
+            await processAndStorePhoto(
+              key,
+              input.files[0]
+            );
+
+          if (!result?.img) {
+            setError(
+              `Não foi possível processar a fotografia de ${key}.`
+            );
+            continue;
+          }
+
+          setStatus(
+            result.saved
+              ? `Fotografia de ${key} processada e guardada na biblioteca.`
+              : `Fotografia de ${key} processada para esta sessão.`
+          );
+
+          continue;
+        }
 
         const img =
           await fileToImage(
-            file
+            input.files[0]
           );
 
-        if (type === 'foto') {
-          /*
-           * A fotografia fica imediatamente disponível
-           * nesta sessão.
-           */
-          state.assets.set(
-            'p:' + compact(key),
-            img
-          );
-
-          /*
-           * E é guardada permanentemente no GitHub.
-           * Se o GitHub/Vercel estiver indisponível,
-           * a publicação continua a poder ser gerada
-           * com a fotografia desta sessão.
-           */
-          const saved =
-            await savePhotoToLibrary(
-              key,
-              file
-            );
-
-          if (!saved) {
-            console.warn(
-              `A fotografia de ${key} foi carregada nesta sessão, ` +
-              'mas não foi possível guardá-la na biblioteca.'
-            );
-          }
-        } else if (type === 'escudo') {
-          state.assets.set(
-            's:' + teamKey(key),
-            img
-          );
-        } else {
-          state.assets.set(
-            'logo',
-            img
-          );
-        }
+        state.assets.set(
+          type === 'escudo'
+            ? 's:' + getTeamKey(normalizedTeamForShield(key))
+            : 'logo',
+          img
+        );
       }
 
       setStatus(
@@ -2680,136 +2926,6 @@ function fileToImage(file) {
       img.src = u;
     }
   );
-}
-
-
-/* =========================================================
-   GUARDAR FOTOGRAFIA NA BIBLIOTECA
-   ========================================================= */
-
-/*
- * As fotografias fornecidas pelo utilizador são guardadas
- * como JPEG otimizado na biblioteca do projeto.
- *
- * Não existe qualquer remoção de fundo.
- * A imagem original continua a ser usada na publicação.
- */
-async function fileToOptimizedDataUrl(file, maxSide = 1600) {
-  const img = await fileToImage(file);
-
-  const iw =
-    img.naturalWidth ||
-    img.width;
-
-  const ih =
-    img.naturalHeight ||
-    img.height;
-
-  if (!iw || !ih) {
-    throw new Error(
-      'A fotografia não tem dimensões válidas.'
-    );
-  }
-
-  const scale =
-    Math.min(
-      1,
-      maxSide / Math.max(iw, ih)
-    );
-
-  const canvas =
-    document.createElement('canvas');
-
-  canvas.width =
-    Math.max(
-      1,
-      Math.round(iw * scale)
-    );
-
-  canvas.height =
-    Math.max(
-      1,
-      Math.round(ih * scale)
-    );
-
-  const ctx =
-    canvas.getContext('2d', {
-      alpha: false
-    });
-
-  ctx.fillStyle =
-    '#ffffff';
-
-  ctx.fillRect(
-    0,
-    0,
-    canvas.width,
-    canvas.height
-  );
-
-  ctx.drawImage(
-    img,
-    0,
-    0,
-    canvas.width,
-    canvas.height
-  );
-
-  return canvas.toDataURL(
-    'image/jpeg',
-    0.90
-  );
-}
-
-async function savePhotoToLibrary(
-  name,
-  file
-) {
-  try {
-    const dataUrl =
-      await fileToOptimizedDataUrl(
-        file
-      );
-
-    const response =
-      await fetch(
-        '/api/foto',
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type':
-              'application/json',
-            'Accept':
-              'application/json'
-          },
-          body: JSON.stringify({
-            name,
-            dataUrl
-          })
-        }
-      );
-
-    const data =
-      await response
-        .json()
-        .catch(() => ({}));
-
-    if (!response.ok) {
-      throw new Error(
-        data?.error ||
-        `Erro ao guardar fotografia (${response.status}).`
-      );
-    }
-
-    return data;
-  } catch (error) {
-    console.warn(
-      'Não foi possível guardar a fotografia na biblioteca:',
-      error
-    );
-
-    return null;
-  }
 }
 
 
@@ -2923,13 +3039,10 @@ async function analyze() {
      * online apenas para faltantes
      */
 
-    state.shieldWarmup =
+    const warmup =
       prefetchShields(
         state.games
       );
-
-    const warmup =
-      state.shieldWarmup;
 
     /*
      * Não bloqueamos a aplicação por mais de 12 segundos.
@@ -2998,15 +3111,8 @@ async function generateAll() {
     performance.now();
 
   /*
-   * O utilizador pode ter clicado em gerar enquanto
-   * a pesquisa dos escudos ainda estava a decorrer.
-   * Esperamos pelo mesmo processo; nunca iniciamos uma
-   * segunda pesquisa nem geramos a publicação a meio.
+   * NÃO há pesquisa de escudos aqui.
    */
-  if (state.shieldWarmup) {
-    await state.shieldWarmup;
-  }
-
   const ok =
     await checkAssets(
       state.games
@@ -3205,40 +3311,13 @@ async function generateManual() {
   );
 
   /*
-   * Escudos manuais têm prioridade absoluta nesta sessão.
-   * Se o utilizador forneceu um ficheiro, não fazemos
-   * pesquisa externa para essa equipa.
+   * Escudos:
+   *
+   * local primeiro
+   * online depois
    */
-  const manualHomeShield =
-    $('mHomeShield').files[0];
-
-  const manualAwayShield =
-    $('mAwayShield').files[0];
-
-  if (manualHomeShield) {
-    state.assets.set(
-      's:' + teamKey(home),
-      await fileToImage(manualHomeShield)
-    );
-  }
-
-  if (manualAwayShield) {
-    state.assets.set(
-      's:' + teamKey(away),
-      await fileToImage(manualAwayShield)
-    );
-  }
-
-  /*
-   * Para equipas sem escudo manual:
-   * biblioteca local primeiro, pesquisa oficial/ZeroZero
-   * depois.
-   */
-  state.shieldWarmup =
-    prefetchShields([g]);
-
   await Promise.race([
-    state.shieldWarmup,
+    prefetchShields([g]),
 
     new Promise(
       resolve =>
@@ -3248,12 +3327,6 @@ async function generateManual() {
         )
     )
   ]);
-
-  /*
-   * Para a geração manual esperamos sempre pela conclusão
-   * da pesquisa de escudos antes de validar os assets.
-   */
-  await state.shieldWarmup;
 
   const ok =
     await checkAssets([g]);
