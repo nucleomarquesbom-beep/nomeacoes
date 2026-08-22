@@ -1,82 +1,91 @@
-/**
- * Regras únicas de normalização de nomes de equipas.
- *
- * SAD / SDUQ / OAF são tratados como sufixos jurídicos.
- * A normalização é usada para pesquisa/correspondência;
- * nunca substitui o nome original apresentado na nomeação.
- */
+// Normalização central dos nomes das equipas para pesquisa de escudos.
+//
+// O PDF pode trazer a designação jurídica/administrativa da sociedade.
+// Para procurar o escudo, SAD / SDUQ / OAF / SDQ / B são tratados da mesma
+// forma e removidos apenas quando aparecem no final da designação.
 
-export function cleanText(value = '') {
-  return String(value)
-    .replace(/\s+/g, ' ')
-    .trim();
-}
+const SUFFIX_REGEX = /(?:[,;:\-]?\s*(?:SAD|SDUQ|OAF|SDQ|B)\s*["“”']?)+\s*$/i;
 
-export function normalizeText(value = '') {
-  return cleanText(value)
-    .toLowerCase()
+function removeAccents(value) {
+  return String(value ?? '')
     .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[ºª°]/g, '')
-    .replace(/[^\p{L}\p{N}\s.'-]/gu, ' ')
+    .replace(/[\u0300-\u036f]/g, '');
+}
+
+function cleanSeparators(value) {
+  return String(value ?? '')
+    .replace(/[“”]/g, '"')
+    .replace(/[‘’]/g, "'")
+    .replace(/[\[\]{}]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }
 
-export function compact(value = '') {
-  return normalizeText(value).replace(/\s+/g, '');
-}
-
 /**
- * Remove apenas o sufixo jurídico quando aparece no fim.
+ * Normaliza uma equipa sem destruir o nome original.
  *
- * Exemplos:
- *   "FC Porto, SAD"     -> "FC Porto"
- *   "Académica OAF"     -> "Académica"
- *   "Clube X / OAF"     -> "Clube X"
- *   "SAD Clube"         -> "SAD Clube"  (não é sufixo)
+ * Ex.:
+ *   FC FAMALICÃO, SAD B      -> FC FAMALICAO
+ *   VITÓRIA SC SAD B         -> VITORIA SC
+ *   SL BENFICA, SAD "B"      -> SL BENFICA
+ *   ACADÉMICA COIMBRA/OAF    -> ACADÉMICA COIMBRA/OAF (OAF não é final aqui)
+ *   ACADÉMICA COIMBRA, OAF   -> ACADÉMICA COIMBRA
  */
-export function teamLookupName(value = '') {
-  let result = cleanText(value);
-
-  /*
-   * Filtro de designação da equipa para pesquisa de escudos.
-   *
-   * A regra é aplicada ao SUFIXO, e pode aparecer em combinação:
-   *   SAD, SDUQ, OAF, SDQ, B
-   *   SAD B, SDUQ B, OAF B, SDQ B
-   *
-   * O B é tratado da mesma forma que os restantes sufixos.
-   * Não alteramos o nome original usado na apresentação.
-   */
-  for (let i = 0; i < 5; i++) {
-    const before = result;
-
-    result = result
-      .replace(/\s*\/\s*OAF\s*$/i, '')
-      .replace(/\s*(?:,|[-–—|])?\s*(?:SAD|SDUQ|OAF|SDQ)\s*B?\s*$/i, '')
-      .replace(/\s*(?:,|[-–—|])?\s*B\s*$/i, '')
-      .trim();
-
-    if (result === before) break;
+export function normalizeTeamName(name) {
+  if (typeof name !== 'string') {
+    return {
+      original: '',
+      cleaned: '',
+      displayName: '',
+      searchName: '',
+      normalizedKey: ''
+    };
   }
 
-  return result;
-}
+  const original = cleanSeparators(name);
+  let cleaned = original;
 
-export function teamKey(value = '') {
-  return compact(teamLookupName(value));
-}
+  // Remove repetidamente os sufixos do fim. Isto trata também: SAD B,
+  // SAD "B", SDUQ B, OAF B, etc.
+  let previous;
+  do {
+    previous = cleaned;
+    cleaned = cleaned
+      .replace(/[\"'“”]+$/g, '')
+      .replace(SUFFIX_REGEX, '')
+      .replace(/[,;:|\-]+\s*$/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+  } while (cleaned !== previous);
 
-export function teamVariants(value = '') {
-  const original = cleanText(value);
-  const lookup = teamLookupName(original);
+  const searchName = removeAccents(cleaned)
+    .replace(/\s+/g, ' ')
+    .trim();
 
-  const variants = new Set([
+  const normalizedKey = removeAccents(cleaned)
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  return {
     original,
-    lookup,
-    lookup.replace(/[,.]/g, ' ').replace(/\s+/g, ' ').trim()
-  ]);
+    cleaned,
+    // A apresentação continua a poder usar o nome original do PDF.
+    displayName: original,
+    searchName,
+    normalizedKey
+  };
+}
 
-  return [...variants].filter(Boolean);
+export function getTeamDisplayName(name) {
+  return normalizeTeamName(name).displayName;
+}
+
+export function getTeamSearchName(name) {
+  return normalizeTeamName(name).searchName;
+}
+
+export function getTeamKey(name) {
+  return normalizeTeamName(name).normalizedKey;
 }
