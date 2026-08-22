@@ -1,6 +1,6 @@
 import { Buffer } from 'node:buffer';
+import { teamLookupName } from '../shared/team-normalize.mjs';
 
-const FPF_BASE = 'https://resultados.fpf.pt';
 const ZEROZERO_BASE = 'https://www.zerozero.pt';
 const JINA_SEARCH = 'https://s.jina.ai/';
 const JINA_READER = 'https://r.jina.ai/';
@@ -19,25 +19,18 @@ function clean(value = '') {
 }
 
 export function normalize(value = '') {
-  return clean(value)
+  return teamLookupName(value)
     .toLowerCase()
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .replace(/[ºª°]/g, '')
     .replace(/["'.,/()]/g, ' ')
-    .replace(/\b(?:sad|sduq|oaf)\b/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }
 
 function lookupName(value = '') {
-  return clean(value)
-    .replace(/\s*\/\s*OAF\b/ig, '')
-    .replace(/\b(?:SAD|SDUQ|OAF)\b/ig, '')
-    .replace(/\s*\((?:B|C|A)\)\s*$/i, '')
-    .replace(/\s+"?(?:B|C)"?\s*$/i, '')
-    .replace(/\s+/g, ' ')
-    .trim();
+  return teamLookupName(value);
 }
 
 function absolute(url, base) {
