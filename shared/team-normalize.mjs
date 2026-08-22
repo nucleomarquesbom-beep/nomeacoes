@@ -39,14 +39,26 @@ export function compact(value = '') {
 export function teamLookupName(value = '') {
   let result = cleanText(value);
 
-  for (let i = 0; i < 3; i++) {
-    const next = result
+  /*
+   * Filtro de designação da equipa para pesquisa de escudos.
+   *
+   * A regra é aplicada ao SUFIXO, e pode aparecer em combinação:
+   *   SAD, SDUQ, OAF, SDQ, B
+   *   SAD B, SDUQ B, OAF B, SDQ B
+   *
+   * O B é tratado da mesma forma que os restantes sufixos.
+   * Não alteramos o nome original usado na apresentação.
+   */
+  for (let i = 0; i < 5; i++) {
+    const before = result;
+
+    result = result
       .replace(/\s*\/\s*OAF\s*$/i, '')
-      .replace(/\s*(?:,|[-–—|])?\s*(?:SAD|SDUQ|OAF)\s*$/i, '')
+      .replace(/\s*(?:,|[-–—|])?\s*(?:SAD|SDUQ|OAF|SDQ)\s*B?\s*$/i, '')
+      .replace(/\s*(?:,|[-–—|])?\s*B\s*$/i, '')
       .trim();
 
-    if (next === result) break;
-    result = next;
+    if (result === before) break;
   }
 
   return result;
