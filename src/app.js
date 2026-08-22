@@ -1,6 +1,14 @@
 import * as pdfjsLib from 'pdfjs-dist/build/pdf.mjs';
 import pdfWorker from 'pdfjs-dist/build/pdf.worker.mjs?url';
 import JSZip from 'jszip';
+import {
+  normalizeText,
+  compact,
+  teamKey,
+  teamLookupName,
+  teamVariants
+} from '../shared/team-normalize.mjs';
+import { roleForPosition } from './core/roles.js';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
 
@@ -10,26 +18,13 @@ const state = {
   pages: [],
   games: [],
   names: new Map(),
-  assets: new Map()
+  assets: new Map(),
+  shieldWarmup: null
 };
 
 /* =========================================================
    TEXTO / NORMALIZAÇÃO
    ========================================================= */
-
-function normalizeText(v = '') {
-  return String(v).toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[ºª°]/g, '')
-    .replace(/[^\p{L}\p{N}\s.'-]/gu, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function compact(v = '') {
-  return normalizeText(v).replace(/\s+/g, '');
-}
 
 function safeFile(v = '') {
   return String(v)
@@ -81,40 +76,6 @@ function findListedName(text) {
 
   return null;
 }
-
-function findListedInText(text) {
-  const normalized = normalizeText(text);
-  const compactText = compact(text);
-
-  const entries = [...state.names.entries()]
-    .sort((a, b) => b[0].length - a[0].length);
-
-  for (const [key, original] of entries) {
-    const target = normalizeText(original);
-    const pos = normalized.indexOf(target);
-
-    if (pos >= 0) {
-      return {
-        name: original,
-        normalizedStart: pos,
-        normalizedEnd: pos + target.length
-      };
-    }
-
-    const cpos = compactText.indexOf(key);
-
-    if (cpos >= 0) {
-      return {
-        name: original,
-        normalizedStart: cpos,
-        normalizedEnd: cpos + key.length
-      };
-    }
-  }
-
-  return null;
-}
-
 
 /* =========================================================
    IDENTIFICAÇÃO DAS LINHAS DO PDF
@@ -171,60 +132,9 @@ function hasAssociation(t) {
   return /\bA\.?\s*F\.?\s+/i.test(t);
 }
 
-function removeAssociation(t) {
-  return t.replace(/\s+A\.?\s*F\.?\s+.*$/i, '').trim();
-}
-
-function looksLikeGameLine(t) {
-  return hasAssociation(t) && /\s-\s/.test(t);
-}
-
-function looksLikeOfficialLine(t) {
-  return hasAssociation(t) && !/\s-\s/.test(t);
-}
-
-function splitGamePrefix(prefix) {
-  const clean = prefix.replace(/\s+/g, ' ').trim();
-  const dash = clean.lastIndexOf(' - ');
-
-  if (dash < 0) return null;
-
-  return {
-    home: clean.slice(0, dash).trim(),
-    away: clean.slice(dash + 3).trim()
-  };
-}
-
-
 /* =========================================================
    FUNÇÃO DOS OFICIAIS
    ========================================================= */
-
-function roleForPosition(index, competition, modality) {
-  if (modality === 'FUTSAL') {
-    if (index === 0) return 'Árbitro';
-    if (index === 1) return '2.º Árbitro';
-    if (index === 2) return '3.º Árbitro';
-    if (index === 3) return 'Cronometrista';
-
-    return 'Oficial';
-  }
-
-  if (isLiga3BPI(competition)) {
-    if (index === 0) return 'Árbitro';
-    if (index === 1) return '4.º Árbitro';
-    if (index === 2) return 'Assistente 1';
-    if (index === 3) return 'Assistente 2';
-
-    return 'Oficial';
-  }
-
-  if (index === 0) return 'Árbitro';
-  if (index === 1) return 'Assistente 1';
-  if (index === 2) return 'Assistente 2';
-
-  return 'Oficial';
-}
 
 function finalizeGame(current) {
   if (!current) return null;
@@ -655,25 +565,6 @@ async function personImage(name) {
    ESCUDOS
    ========================================================= */
 
-function teamVariants(team) {
-  const a = new Set([
-    team.trim(),
-
-    team
-      .replace(/\s*\/\s*OAF\b/ig, '')
-      .replace(/\bSAD\b/ig, '')
-      .replace(/\bSDUQ\b/ig, '')
-      .trim(),
-
-    team
-      .replace(/[,.]/g, '')
-      .trim()
-  ]);
-
-  return [...a].filter(Boolean);
-}
-
-
 /*
  * PESQUISA ONLINE
  *
@@ -684,7 +575,8 @@ async function searchRemoteShield(
   team,
   timeoutMs = 4500
 ) {
-  const key = 'remoteShield:' + compact(team);
+  const lookupTeam = teamLookupName(team);
+  const key = 'remoteShield:' + teamKey(lookupTeam);
 
   const cached = state.assets.get(key);
 
@@ -701,7 +593,7 @@ async function searchRemoteShield(
 
   try {
     const r = await fetch(
-      `/api/escudo?team=${encodeURIComponent(team)}`,
+      `/api/escudo?team=${encodeURIComponent(lookupTeam)}`,
       {
         headers: {
           'Accept': 'application/json'
@@ -736,7 +628,17 @@ async function searchRemoteShield(
     );
 
     state.assets.set(
+      's:' + teamKey(lookupTeam),
+      img
+    );
+
+    state.assets.set(
       'source:' + compact(team),
+      data.source || ''
+    );
+
+    state.assets.set(
+      'source:' + teamKey(lookupTeam),
       data.source || ''
     );
 
@@ -767,18 +669,18 @@ async function searchRemoteShield(
  * antes de qualquer pesquisa online.
  */
 async function shieldLocalImage(team) {
-  const key = 's:' + compact(team);
+  const lookupTeam = teamLookupName(team);
+  const key = 's:' + teamKey(lookupTeam);
 
   if (state.assets.has(key)) {
-    return state.assets.get(key);
+    const img = state.assets.get(key);
+    state.assets.set('s:' + compact(team), img);
+    return img;
   }
 
-  for (const v of teamVariants(team)) {
-    const f = safeFile(v);
+  for (const variant of teamVariants(team)) {
+    const f = safeFile(variant);
 
-    /*
-     * PNG primeiro porque é o formato habitual.
-     */
     for (const ext of [
       'png',
       'jpg',
@@ -786,14 +688,18 @@ async function shieldLocalImage(team) {
       'webp'
     ]) {
       const img = await tryImage(
-        `/escudos/${f}.${ext}?v=5`
+        `/escudos/${f}.${ext}?v=6`
       );
 
       if (img) {
         state.assets.set(key, img);
+        state.assets.set(
+          's:' + compact(team),
+          img
+        );
 
         state.assets.set(
-          'source:' + compact(team),
+          'source:' + key.slice(2),
           'Biblioteca local do Núcleo'
         );
 
@@ -827,27 +733,19 @@ async function prepareOneShieldLocal(team) {
 async function prefetchShields(games) {
   const teams = new Map();
 
-  for (const g of games) {
-    teams.set(
-      compact(g.home),
-      g.home
-    );
-
-    teams.set(
-      compact(g.away),
-      g.away
-    );
+  for (const game of games) {
+    for (const team of [game.home, game.away]) {
+      const lookupTeam = teamLookupName(team);
+      teams.set(teamKey(lookupTeam), lookupTeam);
+    }
   }
 
   const uniqueTeams = [...teams.values()];
   const started = performance.now();
 
   /*
-   * ======================================================
-   * FASE 1 — TODOS OS ESCUDOS LOCAIS
-   * ======================================================
+   * FASE 1 — procurar TODOS os escudos na biblioteca local.
    */
-
   await Promise.all(
     uniqueTeams.map(team =>
       prepareOneShieldLocal(team)
@@ -855,25 +753,15 @@ async function prefetchShields(games) {
   );
 
   /*
-   * ======================================================
-   * FASE 2 — CLUBES QUE NÃO EXISTEM LOCALMENTE
-   * ======================================================
+   * FASE 2 — só os que não existem localmente seguem para
+   * a pesquisa oficial/ZeroZero no backend.
    */
-
   const missingTeams = uniqueTeams.filter(
     team =>
       !state.assets.has(
-        's:' + compact(team)
+        's:' + teamKey(team)
       )
   );
-
-  /*
-   * ======================================================
-   * FASE 3 — PESQUISA ONLINE
-   * ======================================================
-   *
-   * Só os que não foram encontrados localmente.
-   */
 
   await Promise.all(
     missingTeams.map(team =>
@@ -884,7 +772,7 @@ async function prefetchShields(games) {
   const found = uniqueTeams.filter(
     team =>
       state.assets.has(
-        's:' + compact(team)
+        's:' + teamKey(team)
       )
   ).length;
 
@@ -2196,12 +2084,12 @@ function render(game) {
 
   const homeShield =
     state.assets.get(
-      's:' + compact(game.home)
+      's:' + teamKey(game.home)
     ) || null;
 
   const awayShield =
     state.assets.get(
-      's:' + compact(game.away)
+      's:' + teamKey(game.away)
     ) || null;
 
   drawTeamBlock(
@@ -2526,7 +2414,7 @@ async function checkAssets(games) {
   for (const g of games) {
     if (
       !state.assets.has(
-        's:' + compact(g.home)
+        's:' + teamKey(g.home)
       )
     ) {
       missing.push({
@@ -2537,7 +2425,7 @@ async function checkAssets(games) {
 
     if (
       !state.assets.has(
-        's:' + compact(g.away)
+        's:' + teamKey(g.away)
       )
     ) {
       missing.push({
@@ -2713,7 +2601,7 @@ function renderMissing(items) {
           }
         } else if (type === 'escudo') {
           state.assets.set(
-            's:' + compact(key),
+            's:' + teamKey(key),
             img
           );
         } else {
@@ -2998,10 +2886,13 @@ async function analyze() {
      * online apenas para faltantes
      */
 
-    const warmup =
+    state.shieldWarmup =
       prefetchShields(
         state.games
       );
+
+    const warmup =
+      state.shieldWarmup;
 
     /*
      * Não bloqueamos a aplicação por mais de 12 segundos.
@@ -3070,8 +2961,15 @@ async function generateAll() {
     performance.now();
 
   /*
-   * NÃO há pesquisa de escudos aqui.
+   * O utilizador pode ter clicado em gerar enquanto
+   * a pesquisa dos escudos ainda estava a decorrer.
+   * Esperamos pelo mesmo processo; nunca iniciamos uma
+   * segunda pesquisa nem geramos a publicação a meio.
    */
+  if (state.shieldWarmup) {
+    await state.shieldWarmup;
+  }
+
   const ok =
     await checkAssets(
       state.games
@@ -3270,13 +3168,40 @@ async function generateManual() {
   );
 
   /*
-   * Escudos:
-   *
-   * local primeiro
-   * online depois
+   * Escudos manuais têm prioridade absoluta nesta sessão.
+   * Se o utilizador forneceu um ficheiro, não fazemos
+   * pesquisa externa para essa equipa.
    */
+  const manualHomeShield =
+    $('mHomeShield').files[0];
+
+  const manualAwayShield =
+    $('mAwayShield').files[0];
+
+  if (manualHomeShield) {
+    state.assets.set(
+      's:' + teamKey(home),
+      await fileToImage(manualHomeShield)
+    );
+  }
+
+  if (manualAwayShield) {
+    state.assets.set(
+      's:' + teamKey(away),
+      await fileToImage(manualAwayShield)
+    );
+  }
+
+  /*
+   * Para equipas sem escudo manual:
+   * biblioteca local primeiro, pesquisa oficial/ZeroZero
+   * depois.
+   */
+  state.shieldWarmup =
+    prefetchShields([g]);
+
   await Promise.race([
-    prefetchShields([g]),
+    state.shieldWarmup,
 
     new Promise(
       resolve =>
@@ -3286,6 +3211,12 @@ async function generateManual() {
         )
     )
   ]);
+
+  /*
+   * Para a geração manual esperamos sempre pela conclusão
+   * da pesquisa de escudos antes de validar os assets.
+   */
+  await state.shieldWarmup;
 
   const ok =
     await checkAssets([g]);
