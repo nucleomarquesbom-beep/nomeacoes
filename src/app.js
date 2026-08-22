@@ -19,7 +19,8 @@ const state = {
   games: [],
   names: new Map(),
   assets: new Map(),
-  shieldWarmup: null
+  shieldWarmup: null,
+  localShieldManifest: null
 };
 
 /* =========================================================
@@ -576,7 +577,11 @@ async function searchRemoteShield(
   timeoutMs = 4500
 ) {
   const lookupTeam = teamLookupName(team);
-  const key = 'remoteShield:' + teamKey(lookupTeam);
+  const lookupKey = teamKey(lookupTeam);
+
+  if (!lookupTeam || !lookupKey) return null;
+
+  const key = 'remoteShield:' + lookupKey;
 
   const cached = state.assets.get(key);
 
@@ -668,9 +673,50 @@ async function searchRemoteShield(
  * Esta função é executada para TODOS os clubes
  * antes de qualquer pesquisa online.
  */
+async function loadLocalShieldManifest() {
+  if (state.localShieldManifest) {
+    return state.localShieldManifest;
+  }
+
+  try {
+    const r = await fetch('/api/escudos-local', {
+      headers: { Accept: 'application/json' },
+      cache: 'no-store'
+    });
+
+    if (!r.ok) {
+      state.localShieldManifest = new Map();
+      return state.localShieldManifest;
+    }
+
+    const data = await r.json();
+    const map = new Map();
+
+    for (const item of Array.isArray(data?.files) ? data.files : []) {
+      if (!item?.key || !item?.url) continue;
+      map.set(item.key, item.url);
+    }
+
+    state.localShieldManifest = map;
+    return map;
+  } catch (error) {
+    console.warn('Não foi possível carregar o inventário local de escudos:', error);
+    state.localShieldManifest = new Map();
+    return state.localShieldManifest;
+  }
+}
+
+function localShieldKey(value) {
+  return compact(teamLookupName(value));
+}
+
 async function shieldLocalImage(team) {
   const lookupTeam = teamLookupName(team);
   const key = 's:' + teamKey(lookupTeam);
+
+  if (!lookupTeam || !teamKey(lookupTeam)) {
+    return null;
+  }
 
   if (state.assets.has(key)) {
     const img = state.assets.get(key);
@@ -678,34 +724,20 @@ async function shieldLocalImage(team) {
     return img;
   }
 
-  for (const variant of teamVariants(team)) {
-    const f = safeFile(variant);
+  const manifest = await loadLocalShieldManifest();
+  const variants = teamVariants(team);
 
-    for (const ext of [
-      'png',
-      'jpg',
-      'jpeg',
-      'webp'
-    ]) {
-      const img = await tryImage(
-        `/escudos/${f}.${ext}?v=6`
-      );
+  for (const variant of variants) {
+    const url = manifest.get(localShieldKey(variant));
+    if (!url) continue;
 
-      if (img) {
-        state.assets.set(key, img);
-        state.assets.set(
-          's:' + compact(team),
-          img
-        );
+    const img = await tryImage(url + '?v=7');
+    if (!img) continue;
 
-        state.assets.set(
-          'source:' + key.slice(2),
-          'Biblioteca local do Núcleo'
-        );
-
-        return img;
-      }
-    }
+    state.assets.set(key, img);
+    state.assets.set('s:' + compact(team), img);
+    state.assets.set('source:' + key.slice(2), 'Biblioteca local do Núcleo');
+    return img;
   }
 
   return null;
@@ -736,7 +768,12 @@ async function prefetchShields(games) {
   for (const game of games) {
     for (const team of [game.home, game.away]) {
       const lookupTeam = teamLookupName(team);
-      teams.set(teamKey(lookupTeam), lookupTeam);
+      const key = teamKey(lookupTeam);
+
+      /* Nunca pesquisar nem chamar a API com equipa vazia. */
+      if (!lookupTeam || !key) continue;
+
+      teams.set(key, lookupTeam);
     }
   }
 
